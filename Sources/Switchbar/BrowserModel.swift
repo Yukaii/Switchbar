@@ -79,6 +79,8 @@ final class BrowserModel: ObservableObject {
     nonisolated private let logger = Logger(subsystem: "com.switchbar.app", category: "DefaultBrowser")
     private var isSwitchingDefaultBrowser = false
     private var pendingBrowserSwitch: Browser?
+    private var switchStartTime: CFAbsoluteTime?
+    private var progressTask: Task<Void, Never>?
 
     @Published var browsers: [Browser] = [
         Browser(id: "safari", bundleIdentifiers: ["com.apple.Safari"], name: "Safari", accent: .blue, isVisible: true, shortcut: "1"),
@@ -148,6 +150,8 @@ final class BrowserModel: ObservableObject {
 
     func choose(_ browser: Browser) {
         selectedBrowserID = browser.id
+        systemDefaultBrowserName = browser.name
+        statusMessage = "Switching to \(browser.name)..."
         setSystemDefaultBrowser(browser)
     }
 
@@ -282,6 +286,22 @@ final class BrowserModel: ObservableObject {
         } else {
             statusMessage = "\(selectedBrowser.name) is selected locally."
         }
+
+        preregisterBrowsers()
+    }
+
+    private func preregisterBrowsers() {
+        Task.detached { [browsers = self.browsers] in
+            let lsregisterPath = LaunchServices.lsregisterPath
+            for browser in browsers {
+                guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browser.bundleIdentifiers.first ?? "") else { continue }
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: lsregisterPath)
+                process.arguments = ["-f", appURL.path]
+                try? process.run()
+                process.waitUntilExit()
+            }
+        }
     }
 
     private func savePreferences() {
@@ -348,15 +368,46 @@ final class BrowserModel: ObservableObject {
         logger.info("Switch requested: browser=\(browser.name, privacy: .public), bundle=\(bundleIdentifier, privacy: .public), url=\(applicationURL.path, privacy: .public)")
 
         isSwitchingDefaultBrowser = true
-        statusMessage = "Switching macOS default browser to \(browser.name)..."
+        statusMessage = "Switching to \(browser.name)..."
         Task.detached { [weak self, browserID = browser.id, browserName = browser.name, bundleIdentifier, applicationURL] in
-            let macAdminsResult = self?.setDefaultBrowserUsingLaunchServicesPlist(bundleIdentifier, applicationURL: applicationURL) ?? false
-            await MainActor.run {
+            guard let self else { return }
+
+            // Fast path: plist write + register + kill lsd
+            let plistWriteOK = self.setDefaultBrowserPlistOnly(bundleIdentifier, applicationURL: applicationURL)
+            guard plistWriteOK else {
+                await MainActor.run {
+                    self.isSwitchingDefaultBrowser = false
+                    self.statusMessage = "Failed to write Launch Services preferences for \(browserName)."
+                    self.processPendingSwitch()
+                }
+                return
+            }
+
+            // Verify if the fast path worked
+            if self.verifyDefaultBrowser(bundleIdentifier: bundleIdentifier) {
+                await MainActor.run {
+                    self.logger.info("Fast path succeeded for \(browserName, privacy: .public)")
+                    self.statusMessage = "\(browserName) is now the macOS default browser."
+                    self.isSwitchingDefaultBrowser = false
+                    self.processPendingSwitch()
+                }
+                return
+            }
+
+            // Fast path failed — start progress timer and run full rebuild
+            await MainActor.run { [weak self] in
+                self?.statusMessage = "Rebuilding Launch Services..."
+                self?.startProgressTimer()
+            }
+
+            let rebuildOK = self.fullRebuildAfterPlistWrite()
+
+            await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.logger.info("MacAdmins-style LaunchServices result: success=\(macAdminsResult)")
-                if macAdminsResult {
+                self.stopProgressTimer()
+                if rebuildOK {
                     let refreshedBrowserID = self.refreshSystemDefaultBrowser()
-                    self.logger.info("After MacAdmins-style refresh: expected=\(browserID, privacy: .public), actual=\(refreshedBrowserID ?? "nil", privacy: .public), actualName=\(self.systemDefaultBrowserName ?? "nil", privacy: .public)")
+                    self.logger.info("After full rebuild: expected=\(browserID, privacy: .public), actual=\(refreshedBrowserID ?? "nil", privacy: .public)")
                     self.statusMessage = refreshedBrowserID == browserID
                         ? "\(browserName) is now the macOS default browser."
                         : "Launch Services was rebuilt, but macOS still reports \(self.systemDefaultBrowserName ?? "another browser")."
@@ -364,12 +415,35 @@ final class BrowserModel: ObservableObject {
                     self.setDefaultBrowserUsingPublicFallback(bundleIdentifier: bundleIdentifier, browserID: browserID, browserName: browserName)
                 }
                 self.isSwitchingDefaultBrowser = false
-                if let pendingBrowserSwitch = self.pendingBrowserSwitch {
-                    self.pendingBrowserSwitch = nil
-                    self.setSystemDefaultBrowser(pendingBrowserSwitch)
+                self.processPendingSwitch()
+            }
+        }
+    }
+
+    private func processPendingSwitch() {
+        if let pending = pendingBrowserSwitch {
+            pendingBrowserSwitch = nil
+            setSystemDefaultBrowser(pending)
+        }
+    }
+
+    private func startProgressTimer() {
+        switchStartTime = CFAbsoluteTimeGetCurrent()
+        progressTask = Task { @MainActor [weak self] in
+            while let self, !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                if let start = self.switchStartTime {
+                    let elapsed = Int(CFAbsoluteTimeGetCurrent() - start)
+                    self.statusMessage = "Rebuilding Launch Services (\(elapsed)s)..."
                 }
             }
         }
+    }
+
+    private func stopProgressTimer() {
+        progressTask?.cancel()
+        progressTask = nil
+        switchStartTime = nil
     }
 
     private func setDefaultBrowserUsingPublicFallback(bundleIdentifier: String, browserID: String, browserName: String) {
@@ -458,20 +532,83 @@ final class BrowserModel: ObservableObject {
             )
             logger.info("lsregister app result: status=\(registerAppResult.status), output=\(registerAppResult.output, privacy: .public)")
 
+            let killResult = runCommand("/usr/bin/killall", arguments: ["lsd"])
+            logger.info("killall lsd result: status=\(killResult.status), output=\(killResult.output, privacy: .public)")
+
+            // Fast path: plist write + register + kill lsd
+            if verifyDefaultBrowser(bundleIdentifier: bundleIdentifier) {
+                logger.info("Fast path succeeded: Launch Services picked up the change")
+                return true
+            }
+
+            // Fast path failed — fall back to full rebuild
+            logger.info("Fast path failed: falling back to full lsregister rebuild")
             let rescanResult = runCommand(
                 LaunchServices.lsregisterPath,
                 arguments: ["-gc", "-R", "-all", "user,system,local,network"]
             )
-            logger.info("lsregister result: status=\(rescanResult.status), output=\(rescanResult.output, privacy: .public)")
+            logger.info("lsregister rebuild result: status=\(rescanResult.status), output=\(rescanResult.output, privacy: .public)")
 
-            let killResult = runCommand("/usr/bin/killall", arguments: ["lsd"])
-            logger.info("killall lsd result: status=\(killResult.status), output=\(killResult.output, privacy: .public)")
+            let killAfterRebuild = runCommand("/usr/bin/killall", arguments: ["lsd"])
+            logger.info("killall lsd after rebuild: status=\(killAfterRebuild.status)")
 
-            return rescanResult.status == 0 && (killResult.status == 0 || killResult.status == 1)
+            return rescanResult.status == 0 && (killAfterRebuild.status == 0 || killAfterRebuild.status == 1)
         } catch {
             logger.error("MacAdmins-style LaunchServices update failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
+    }
+
+    nonisolated private func setDefaultBrowserPlistOnly(_ bundleIdentifier: String, applicationURL: URL) -> Bool {
+        do {
+            var plist = try loadLaunchServicesPlist()
+            var handlers = plist["LSHandlers"] as? [[String: Any]] ?? []
+            logger.info("File plist handlers loaded: count=\(handlers.count), path=\(LaunchServices.plistURL.path, privacy: .public)")
+
+            removeBrowserHandlers(from: &handlers)
+            handlers.append(contentsOf: browserHandlers(for: bundleIdentifier))
+            plist["LSHandlers"] = handlers
+
+            try writeLaunchServicesPlist(plist)
+            logger.info("File plist handlers written: count=\(handlers.count)")
+
+            let registerAppResult = runCommand(
+                LaunchServices.lsregisterPath,
+                arguments: ["-f", applicationURL.path]
+            )
+            logger.info("lsregister app result: status=\(registerAppResult.status), output=\(registerAppResult.output, privacy: .public)")
+
+            let killResult = runCommand("/usr/bin/killall", arguments: ["lsd"])
+            logger.info("killall lsd result: status=\(killResult.status), output=\(killResult.output, privacy: .public)")
+
+            return true
+        } catch {
+            logger.error("MacAdmins-style plist update failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    nonisolated private func fullRebuildAfterPlistWrite() -> Bool {
+        let rescanResult = runCommand(
+            LaunchServices.lsregisterPath,
+            arguments: ["-gc", "-R", "-all", "user,system,local,network"]
+        )
+        logger.info("lsregister rebuild result: status=\(rescanResult.status), output=\(rescanResult.output, privacy: .public)")
+
+        let killAfterRebuild = runCommand("/usr/bin/killall", arguments: ["lsd"])
+        logger.info("killall lsd after rebuild: status=\(killAfterRebuild.status)")
+
+        return rescanResult.status == 0 && (killAfterRebuild.status == 0 || killAfterRebuild.status == 1)
+    }
+
+    nonisolated private func verifyDefaultBrowser(bundleIdentifier: String) -> Bool {
+        guard let testURL = URL(string: "https://example.com"),
+              let appURL = NSWorkspace.shared.urlForApplication(toOpen: testURL),
+              let actualBundleID = Bundle(url: appURL)?.bundleIdentifier
+        else {
+            return false
+        }
+        return actualBundleID == bundleIdentifier
     }
 
     nonisolated private func loadLaunchServicesPlist() throws -> [String: Any] {
