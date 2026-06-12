@@ -50,14 +50,6 @@ final class StatusController {
         settings.target = self
         menu.addItem(settings)
 
-        let more = NSMenuItem(title: "More", action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-        submenu.addItem(menuItem("Set from Shortcut", action: #selector(runShortcut)))
-        submenu.addItem(menuItem("Apply Work Focus", action: #selector(applyWorkFocus)))
-        submenu.addItem(menuItem("Open Inspiration Website", action: #selector(openWebsite)))
-        more.submenu = submenu
-        menu.addItem(more)
-
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Switchbar", action: #selector(quit), keyEquivalent: "q")
         quit.keyEquivalentModifierMask = .command
@@ -65,12 +57,6 @@ final class StatusController {
         menu.addItem(quit)
 
         statusItem.menu = menu
-    }
-
-    private func menuItem(_ title: String, action: Selector) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        item.target = self
-        return item
     }
 
     private func menuIcon(for browser: Browser, model: BrowserModel) -> NSImage {
@@ -90,19 +76,6 @@ final class StatusController {
 
     @objc private func openSettings() {
         AppState.shared.showSettings()
-    }
-
-    @objc private func runShortcut() {
-        model?.runShortcutAction(named: "Set Browser")
-    }
-
-    @objc private func applyWorkFocus() {
-        guard let rule = model?.focusRules.first(where: { $0.focus == "Work" }) else { return }
-        model?.applyFocus(rule)
-    }
-
-    @objc private func openWebsite() {
-        NSWorkspace.shared.open(URL(string: "https://sindresorhus.com/default-browser")!)
     }
 
     @objc private func quit() {

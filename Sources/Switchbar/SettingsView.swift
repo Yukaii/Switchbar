@@ -72,8 +72,17 @@ struct SettingsView: View {
             .padding(.top, 16)
 
             Spacer(minLength: 16)
+
+            HStack {
+                Spacer()
+                Link("Inspired by Default Browser", destination: URL(string: "https://sindresorhus.com/default-browser#scripting")!)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.bottom, 8)
         }
-        .frame(width: 475, height: 260)
+        .frame(width: 475, height: 280)
         .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(.dark)
         .sheet(isPresented: $isConfiguringBrowsers) {
