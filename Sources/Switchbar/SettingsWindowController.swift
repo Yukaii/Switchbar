@@ -15,14 +15,14 @@ final class SettingsWindowController {
             .environmentObject(model)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 475, height: 300),
+            contentRect: NSRect(x: 0, y: 0, width: 475, height: 260),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "Default Browser Settings"
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .visible
+        window.titlebarAppearsTransparent = false
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: contentView)
         window.center()

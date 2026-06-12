@@ -81,6 +81,7 @@ final class BrowserModel: ObservableObject {
     private var pendingBrowserSwitch: Browser?
     private var switchStartTime: CFAbsoluteTime?
     private var progressTask: Task<Void, Never>?
+    private var isLoadingPreferences = false
 
     @Published var browsers: [Browser] = [
         Browser(id: "safari", bundleIdentifiers: ["com.apple.Safari"], name: "Safari", accent: .blue, isVisible: true, shortcut: "1"),
@@ -149,6 +150,7 @@ final class BrowserModel: ObservableObject {
     }
 
     func choose(_ browser: Browser) {
+        logger.info("choose: selecting browser=\(browser.name, privacy: .public), id=\(browser.id, privacy: .public)")
         selectedBrowserID = browser.id
         systemDefaultBrowserName = browser.name
         statusMessage = "Switching to \(browser.name)..."
@@ -227,11 +229,15 @@ final class BrowserModel: ObservableObject {
     }
 
     private func notifyChanged() {
+        guard !isLoadingPreferences else { return }
         savePreferences()
         onChange?()
     }
 
     private func loadPreferences() {
+        isLoadingPreferences = true
+        defer { isLoadingPreferences = false }
+
         loadDiscoveredBrowsers()
 
         let hiddenBrowserIDs = Set(defaults.stringArray(forKey: DefaultsKey.hiddenBrowserIDs) ?? [])
@@ -241,14 +247,21 @@ final class BrowserModel: ObservableObject {
             return browser
         }
 
-        let systemDefaultBrowserID = refreshSystemDefaultBrowser()
+        logger.info("loadPreferences: saved selectedBrowserID=\(self.defaults.string(forKey: DefaultsKey.selectedBrowserID) ?? "nil", privacy: .public)")
 
-        if let systemDefaultBrowserID {
-            selectedBrowserID = systemDefaultBrowserID
-        } else if let savedSelectedBrowserID = defaults.string(forKey: DefaultsKey.selectedBrowserID),
+        if let savedSelectedBrowserID = defaults.string(forKey: DefaultsKey.selectedBrowserID),
            browsers.contains(where: { $0.id == savedSelectedBrowserID }) {
             selectedBrowserID = savedSelectedBrowserID
+            logger.info("loadPreferences: using saved browser=\(savedSelectedBrowserID, privacy: .public)")
+        } else if let systemDefaultBrowserID = refreshSystemDefaultBrowser() {
+            selectedBrowserID = systemDefaultBrowserID
+            logger.info("loadPreferences: using system default=\(systemDefaultBrowserID, privacy: .public)")
+        } else {
+            logger.info("loadPreferences: no saved or system default, keeping initial=\(self.selectedBrowserID, privacy: .public)")
         }
+
+        _ = refreshSystemDefaultBrowser()
+        logger.info("loadPreferences: after refresh, selectedBrowserID=\(self.selectedBrowserID, privacy: .public), systemDefault=\(self.systemDefaultBrowserName ?? "nil", privacy: .public)")
 
         if defaults.object(forKey: DefaultsKey.hidesMenuBarIcon) != nil {
             hidesMenuBarIcon = defaults.bool(forKey: DefaultsKey.hidesMenuBarIcon)
@@ -278,8 +291,11 @@ final class BrowserModel: ObservableObject {
         applySavedBrowserOrder()
 
         if !visibleBrowsers.contains(where: { $0.id == selectedBrowserID }) {
+            logger.info("loadPreferences: selected browser \(self.selectedBrowserID, privacy: .public) not visible, overriding to first visible")
             selectedBrowserID = visibleBrowsers.first?.id ?? browsers[0].id
         }
+
+        logger.info("loadPreferences: final selectedBrowserID=\(self.selectedBrowserID, privacy: .public), status=\(self.statusMessage, privacy: .public)")
 
         if systemDefaultBrowserName == selectedBrowser.name {
             statusMessage = "\(selectedBrowser.name) is the current macOS default browser."
@@ -305,6 +321,7 @@ final class BrowserModel: ObservableObject {
     }
 
     private func savePreferences() {
+        logger.info("savePreferences: writing selectedBrowserID=\(self.selectedBrowserID, privacy: .public)")
         defaults.set(selectedBrowserID, forKey: DefaultsKey.selectedBrowserID)
         defaults.set(browsers.filter { !$0.isVisible }.map(\.id), forKey: DefaultsKey.hiddenBrowserIDs)
         defaults.set(hidesMenuBarIcon, forKey: DefaultsKey.hidesMenuBarIcon)

@@ -8,12 +8,6 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Text("Default Browser Settings")
-                .font(.system(size: 15, weight: .semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.top, 18)
-                .padding(.horizontal, 18)
-
             VStack(spacing: 0) {
                 SettingsRow("Launch at login") {
                     Toggle("", isOn: $model.launchAtLogin)
@@ -75,11 +69,11 @@ struct SettingsView: View {
                     )
             )
             .padding(.horizontal, 28)
-            .padding(.top, 40)
+            .padding(.top, 16)
 
-            Spacer(minLength: 24)
+            Spacer(minLength: 16)
         }
-        .frame(width: 475, height: 300)
+        .frame(width: 475, height: 260)
         .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(.dark)
         .sheet(isPresented: $isConfiguringBrowsers) {
