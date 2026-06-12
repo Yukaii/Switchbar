@@ -1,6 +1,8 @@
 import AppKit
 import Carbon
 import CoreServices
+import Darwin
+import os
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -67,7 +69,16 @@ final class BrowserModel: ObservableObject {
         static let browserOrder = "browserOrder"
     }
 
+    private enum LaunchServices {
+        static let plistURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist")
+        static let lsregisterPath = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    }
+
     private let defaults: UserDefaults
+    nonisolated private let logger = Logger(subsystem: "com.switchbar.app", category: "DefaultBrowser")
+    private var isSwitchingDefaultBrowser = false
+    private var pendingBrowserSwitch: Browser?
 
     @Published var browsers: [Browser] = [
         Browser(id: "safari", bundleIdentifiers: ["com.apple.Safari"], name: "Safari", accent: .blue, isVisible: true, shortcut: "1"),
@@ -311,7 +322,15 @@ final class BrowserModel: ObservableObject {
     }
 
     private func setSystemDefaultBrowser(_ browser: Browser) {
-        guard installedApplicationURL(for: browser) != nil else {
+        if isSwitchingDefaultBrowser {
+            pendingBrowserSwitch = browser
+            statusMessage = "Queued switch to \(browser.name)..."
+            logger.info("Switch queued while another rebuild is running: browser=\(browser.name, privacy: .public)")
+            return
+        }
+
+        guard let applicationURL = installedApplicationURL(for: browser) else {
+            logger.error("Switch aborted: \(browser.name, privacy: .public) is not installed")
             statusMessage = "\(browser.name) is not installed, so macOS default was not changed."
             return
         }
@@ -321,34 +340,64 @@ final class BrowserModel: ObservableObject {
         }
 
         guard let bundleIdentifier else {
+            logger.error("Switch aborted: no installed bundle identifier found for \(browser.name, privacy: .public)")
             statusMessage = "\(browser.name) is not installed, so macOS default was not changed."
             return
         }
 
-        if setLaunchServicesHandlersSilently(to: bundleIdentifier) {
-            let refreshedBrowserID = refreshSystemDefaultBrowser()
-            if refreshedBrowserID == browser.id {
-                statusMessage = "\(browser.name) is now the macOS default browser."
-            } else {
-                statusMessage = "Updated Launch Services, but macOS still reports \(systemDefaultBrowserName ?? "another browser")."
+        logger.info("Switch requested: browser=\(browser.name, privacy: .public), bundle=\(bundleIdentifier, privacy: .public), url=\(applicationURL.path, privacy: .public)")
+
+        isSwitchingDefaultBrowser = true
+        statusMessage = "Switching macOS default browser to \(browser.name)..."
+        Task.detached { [weak self, browserID = browser.id, browserName = browser.name, bundleIdentifier, applicationURL] in
+            let macAdminsResult = self?.setDefaultBrowserUsingLaunchServicesPlist(bundleIdentifier, applicationURL: applicationURL) ?? false
+            await MainActor.run {
+                guard let self else { return }
+                self.logger.info("MacAdmins-style LaunchServices result: success=\(macAdminsResult)")
+                if macAdminsResult {
+                    let refreshedBrowserID = self.refreshSystemDefaultBrowser()
+                    self.logger.info("After MacAdmins-style refresh: expected=\(browserID, privacy: .public), actual=\(refreshedBrowserID ?? "nil", privacy: .public), actualName=\(self.systemDefaultBrowserName ?? "nil", privacy: .public)")
+                    self.statusMessage = refreshedBrowserID == browserID
+                        ? "\(browserName) is now the macOS default browser."
+                        : "Launch Services was rebuilt, but macOS still reports \(self.systemDefaultBrowserName ?? "another browser")."
+                } else {
+                    self.setDefaultBrowserUsingPublicFallback(bundleIdentifier: bundleIdentifier, browserID: browserID, browserName: browserName)
+                }
+                self.isSwitchingDefaultBrowser = false
+                if let pendingBrowserSwitch = self.pendingBrowserSwitch {
+                    self.pendingBrowserSwitch = nil
+                    self.setSystemDefaultBrowser(pendingBrowserSwitch)
+                }
             }
+        }
+    }
+
+    private func setDefaultBrowserUsingPublicFallback(bundleIdentifier: String, browserID: String, browserName: String) {
+        let preferenceWriteSucceeded = setLaunchServicesHandlersSilently(to: bundleIdentifier)
+        logger.info("LaunchServices preference write result: success=\(preferenceWriteSucceeded)")
+        if preferenceWriteSucceeded {
+            let refreshedBrowserID = refreshSystemDefaultBrowser()
+            logger.info("After preference write refresh: expected=\(browserID, privacy: .public), actual=\(refreshedBrowserID ?? "nil", privacy: .public), actualName=\(self.systemDefaultBrowserName ?? "nil", privacy: .public)")
+            statusMessage = refreshedBrowserID == browserID
+                ? "\(browserName) is now the macOS default browser."
+                : "Updated Launch Services, but macOS still reports \(systemDefaultBrowserName ?? "another browser")."
             return
         }
 
         let httpStatus = LSSetDefaultHandlerForURLScheme("http" as CFString, bundleIdentifier as CFString)
         let httpsStatus = LSSetDefaultHandlerForURLScheme("https" as CFString, bundleIdentifier as CFString)
+        logger.info("Public URL scheme results: http=\(httpStatus), https=\(httpsStatus)")
 
         guard httpStatus == noErr, httpsStatus == noErr else {
-            statusMessage = "macOS did not change the default browser. HTTP status: \(httpStatus), HTTPS status: \(httpsStatus)."
+            statusMessage = "macOS did not change the default browser. HTTP: \(httpStatus), HTTPS: \(httpsStatus)."
             return
         }
 
         let refreshedBrowserID = refreshSystemDefaultBrowser()
-        if refreshedBrowserID == browser.id {
-            statusMessage = "\(browser.name) is now the macOS default browser."
-        } else {
-            statusMessage = "macOS accepted the request, but the current default did not change to \(browser.name)."
-        }
+        logger.info("After public API refresh: expected=\(browserID, privacy: .public), actual=\(refreshedBrowserID ?? "nil", privacy: .public), actualName=\(self.systemDefaultBrowserName ?? "nil", privacy: .public)")
+        statusMessage = refreshedBrowserID == browserID
+            ? "\(browserName) is now the macOS default browser."
+            : "macOS accepted the request, but the current default did not change to \(browserName)."
     }
 
     func installedApplicationURL(for browser: Browser) -> URL? {
@@ -359,10 +408,12 @@ final class BrowserModel: ObservableObject {
 
     private func setLaunchServicesHandlersSilently(to bundleIdentifier: String) -> Bool {
         guard let launchServicesDefaults = UserDefaults(suiteName: "com.apple.LaunchServices/com.apple.launchservices.secure") else {
+            logger.error("LaunchServices preference domain unavailable")
             return false
         }
 
         var handlers = launchServicesDefaults.array(forKey: "LSHandlers") as? [[String: Any]] ?? []
+        logger.info("LaunchServices handlers loaded: count=\(handlers.count)")
         upsertHandler(
             in: &handlers,
             matchingKey: "LSHandlerContentType",
@@ -383,7 +434,135 @@ final class BrowserModel: ObservableObject {
         )
 
         launchServicesDefaults.set(handlers, forKey: "LSHandlers")
-        return launchServicesDefaults.synchronize()
+        let synchronized = launchServicesDefaults.synchronize()
+        logger.info("LaunchServices handlers synchronized: success=\(synchronized), count=\(handlers.count)")
+        return synchronized
+    }
+
+    nonisolated private func setDefaultBrowserUsingLaunchServicesPlist(_ bundleIdentifier: String, applicationURL: URL) -> Bool {
+        do {
+            var plist = try loadLaunchServicesPlist()
+            var handlers = plist["LSHandlers"] as? [[String: Any]] ?? []
+            logger.info("File plist handlers loaded: count=\(handlers.count), path=\(LaunchServices.plistURL.path, privacy: .public)")
+
+            removeBrowserHandlers(from: &handlers)
+            handlers.append(contentsOf: browserHandlers(for: bundleIdentifier))
+            plist["LSHandlers"] = handlers
+
+            try writeLaunchServicesPlist(plist)
+            logger.info("File plist handlers written: count=\(handlers.count)")
+
+            let registerAppResult = runCommand(
+                LaunchServices.lsregisterPath,
+                arguments: ["-f", applicationURL.path]
+            )
+            logger.info("lsregister app result: status=\(registerAppResult.status), output=\(registerAppResult.output, privacy: .public)")
+
+            let rescanResult = runCommand(
+                LaunchServices.lsregisterPath,
+                arguments: ["-gc", "-R", "-all", "user,system,local,network"]
+            )
+            logger.info("lsregister result: status=\(rescanResult.status), output=\(rescanResult.output, privacy: .public)")
+
+            let killResult = runCommand("/usr/bin/killall", arguments: ["lsd"])
+            logger.info("killall lsd result: status=\(killResult.status), output=\(killResult.output, privacy: .public)")
+
+            return rescanResult.status == 0 && (killResult.status == 0 || killResult.status == 1)
+        } catch {
+            logger.error("MacAdmins-style LaunchServices update failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    nonisolated private func loadLaunchServicesPlist() throws -> [String: Any] {
+        let directoryURL = LaunchServices.plistURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+
+        guard FileManager.default.fileExists(atPath: LaunchServices.plistURL.path) else {
+            return [:]
+        }
+
+        let data = try Data(contentsOf: LaunchServices.plistURL)
+        let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        return plist ?? [:]
+    }
+
+    nonisolated private func writeLaunchServicesPlist(_ plist: [String: Any]) throws {
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try data.write(to: LaunchServices.plistURL, options: .atomic)
+    }
+
+    nonisolated private func removeBrowserHandlers(from handlers: inout [[String: Any]]) {
+        let contentTypes = Set([
+            "com.apple.default-app.web-browser",
+            "public.url",
+            "public.xhtml",
+            "public.html"
+        ])
+        let urlSchemes = Set(["http", "https"])
+
+        handlers.removeAll { handler in
+            if let contentType = handler["LSHandlerContentType"] as? String {
+                return contentTypes.contains(contentType)
+            }
+            if let urlScheme = handler["LSHandlerURLScheme"] as? String {
+                return urlSchemes.contains(urlScheme)
+            }
+            return false
+        }
+    }
+
+    nonisolated private func browserHandlers(for bundleIdentifier: String) -> [[String: Any]] {
+        [
+            [
+                "LSHandlerContentType": "com.apple.default-app.web-browser",
+                "LSHandlerPreferredVersions": ["LSHandlerRoleAll": "-"],
+                "LSHandlerRoleAll": bundleIdentifier
+            ],
+            [
+                "LSHandlerContentType": "public.url",
+                "LSHandlerPreferredVersions": ["LSHandlerRoleViewer": "-"],
+                "LSHandlerRoleViewer": bundleIdentifier
+            ],
+            [
+                "LSHandlerContentType": "public.xhtml",
+                "LSHandlerPreferredVersions": ["LSHandlerRoleAll": "-"],
+                "LSHandlerRoleAll": bundleIdentifier
+            ],
+            [
+                "LSHandlerContentType": "public.html",
+                "LSHandlerPreferredVersions": ["LSHandlerRoleAll": "-"],
+                "LSHandlerRoleAll": bundleIdentifier
+            ],
+            [
+                "LSHandlerURLScheme": "https",
+                "LSHandlerPreferredVersions": ["LSHandlerRoleAll": "-"],
+                "LSHandlerRoleAll": bundleIdentifier
+            ],
+            [
+                "LSHandlerURLScheme": "http",
+                "LSHandlerPreferredVersions": ["LSHandlerRoleAll": "-"],
+                "LSHandlerRoleAll": bundleIdentifier
+            ]
+        ]
+    }
+
+    nonisolated private func runCommand(_ path: String, arguments: [String]) -> (status: Int32, output: String) {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        } catch {
+            return (-1, error.localizedDescription)
+        }
     }
 
     private func upsertHandler(

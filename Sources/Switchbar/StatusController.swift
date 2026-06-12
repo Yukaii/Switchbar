@@ -32,8 +32,9 @@ final class StatusController {
         }
 
         let menu = NSMenu()
-        for browser in model.visibleBrowsers {
-            let item = NSMenuItem(title: browser.name, action: #selector(selectBrowser(_:)), keyEquivalent: browser.shortcut)
+        for (index, browser) in model.visibleBrowsers.enumerated() {
+            let keyEquivalent = index < 9 ? String(index + 1) : ""
+            let item = NSMenuItem(title: browser.name, action: #selector(selectBrowser(_:)), keyEquivalent: keyEquivalent)
             item.keyEquivalentModifierMask = []
             item.target = self
             item.representedObject = browser.id
