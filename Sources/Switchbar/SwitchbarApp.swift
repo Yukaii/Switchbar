@@ -8,14 +8,12 @@ struct SwitchbarApp: App {
 
     var body: some Scene {
         Settings {
-            SettingsView()
-                .environmentObject(model)
+            EmptyView()
         }
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings...") {
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                    NSApp.activate(ignoringOtherApps: true)
+                    AppState.shared.showSettings()
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }
@@ -28,16 +26,39 @@ final class AppState {
     static let shared = AppState()
 
     let model = BrowserModel()
+    private let settingsWindowController = SettingsWindowController()
 
     private init() {}
+
+    func showSettings() {
+        settingsWindowController.show(model: model)
+    }
 }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusController = StatusController()
+    private let hotKeyController = GlobalHotKeyController()
+    private var boundModel: BrowserModel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        statusController.bind(AppState.shared.model)
+        let model = AppState.shared.model
+        boundModel = model
+        statusController.bind(model)
+        registerHotKey(for: model)
+        model.onChange = { [weak self, weak model] in
+            Task { @MainActor in
+                guard let self, let model else { return }
+                self.statusController.rebuildFromModelChange()
+                self.registerHotKey(for: model)
+            }
+        }
+    }
+
+    private func registerHotKey(for model: BrowserModel) {
+        hotKeyController.register(model.globalHotKey) { [weak self] in
+            self?.statusController.showMenu()
+        }
     }
 }

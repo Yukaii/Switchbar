@@ -8,10 +8,17 @@ final class StatusController {
 
     func bind(_ model: BrowserModel) {
         self.model = model
-        model.onChange = { [weak self] in
-            Task { @MainActor in self?.rebuildMenu() }
-        }
         rebuildMenu()
+    }
+
+    func rebuildFromModelChange() {
+        rebuildMenu()
+    }
+
+    func showMenu() {
+        guard let button = statusItem.button else { return }
+        statusItem.menu = statusItem.menu ?? NSMenu()
+        button.performClick(nil)
     }
 
     private func rebuildMenu() {
@@ -27,6 +34,7 @@ final class StatusController {
         let menu = NSMenu()
         for browser in model.visibleBrowsers {
             let item = NSMenuItem(title: browser.name, action: #selector(selectBrowser(_:)), keyEquivalent: browser.shortcut)
+            item.keyEquivalentModifierMask = []
             item.target = self
             item.representedObject = browser.id
             item.state = browser.id == model.selectedBrowserID ? .on : .off
@@ -80,8 +88,7 @@ final class StatusController {
     }
 
     @objc private func openSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        NSApp.activate(ignoringOtherApps: true)
+        AppState.shared.showSettings()
     }
 
     @objc private func runShortcut() {

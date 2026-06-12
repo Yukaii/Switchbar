@@ -1,18 +1,16 @@
+import AppKit
+import Carbon
 import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var model: BrowserModel
     @State private var isConfiguringBrowsers = false
-    @State private var isRecordingShortcut = false
 
     var body: some View {
         VStack(spacing: 0) {
             Text("Default Browser Settings")
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 15, weight: .semibold))
                 .frame(maxWidth: .infinity)
-                .overlay(alignment: .leading) {
-                    WindowControls()
-                }
                 .padding(.top, 18)
                 .padding(.horizontal, 18)
 
@@ -59,16 +57,15 @@ struct SettingsView: View {
                 Divider()
 
                 SettingsRow("Toggle menu") {
-                    Button(isRecordingShortcut ? "Recording..." : "Record Shortcut") {
-                        isRecordingShortcut.toggle()
-                        model.globalShortcut = isRecordingShortcut ? "Recording..." : "⌥ Space"
-                    }
-                    .frame(width: 176)
-                    .disabled(isRecordingShortcut)
+                    HotKeyRecorder(
+                        shortcut: $model.globalShortcut,
+                        onRecord: { model.setGlobalHotKey($0) }
+                    )
+                        .frame(width: 150, height: 28)
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.vertical, 8)
             .background(
                 RoundedRectangle(cornerRadius: 6)
                     .strokeBorder(Color.white.opacity(0.16))
@@ -78,11 +75,11 @@ struct SettingsView: View {
                     )
             )
             .padding(.horizontal, 28)
-            .padding(.top, 42)
+            .padding(.top, 40)
 
             Spacer(minLength: 24)
         }
-        .frame(width: 475, height: 315)
+        .frame(width: 475, height: 300)
         .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(.dark)
         .sheet(isPresented: $isConfiguringBrowsers) {
@@ -104,7 +101,7 @@ private struct SettingsRow<Accessory: View>: View {
     var body: some View {
         HStack(spacing: 14) {
             Text(title)
-                .font(.system(size: 19, weight: .medium))
+                .font(.system(size: 15, weight: .regular))
                 .foregroundStyle(.primary)
 
             Spacer()
@@ -112,21 +109,7 @@ private struct SettingsRow<Accessory: View>: View {
             accessory
                 .controlSize(.large)
         }
-        .frame(height: 52)
-    }
-}
-
-private struct WindowControls: View {
-    var body: some View {
-        HStack(spacing: 12) {
-            Circle()
-                .fill(Color(red: 1.0, green: 0.37, blue: 0.34))
-            Circle()
-                .fill(Color.white.opacity(0.16))
-            Circle()
-                .fill(Color.white.opacity(0.16))
-        }
-        .frame(width: 76, height: 18)
+        .frame(height: 42)
     }
 }
 
@@ -140,6 +123,12 @@ private struct BrowserConfigurationSheet: View {
                 Text("Shown Browsers")
                     .font(.headline)
                 Spacer()
+                Button {
+                    addBrowser()
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+
                 Button("Done") {
                     dismiss()
                 }
@@ -148,7 +137,7 @@ private struct BrowserConfigurationSheet: View {
             .padding(20)
 
             List {
-                ForEach(model.browsers) { browser in
+                ForEach(Array(model.browsers.enumerated()), id: \.element.id) { index, browser in
                     HStack(spacing: 12) {
                         BrowserIcon(browser: browser, size: 24)
 
@@ -163,6 +152,23 @@ private struct BrowserConfigurationSheet: View {
 
                         Spacer()
 
+                        HStack(spacing: 4) {
+                            Button {
+                                model.moveBrowser(id: browser.id, direction: -1)
+                            } label: {
+                                Image(systemName: "chevron.up")
+                            }
+                            .disabled(index == 0)
+
+                            Button {
+                                model.moveBrowser(id: browser.id, direction: 1)
+                            } label: {
+                                Image(systemName: "chevron.down")
+                            }
+                            .disabled(index == model.browsers.count - 1)
+                        }
+                        .buttonStyle(.borderless)
+
                         Toggle("", isOn: Binding(
                             get: { browser.isVisible },
                             set: { _ in model.toggleVisibility(for: browser) }
@@ -174,8 +180,21 @@ private struct BrowserConfigurationSheet: View {
             }
             .scrollContentBackground(.hidden)
         }
-        .frame(width: 360, height: 360)
+        .frame(width: 430, height: 420)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func addBrowser() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+
+        if panel.runModal() == .OK, let url = panel.url {
+            model.addBrowser(from: url)
+        }
     }
 }
 
@@ -190,5 +209,94 @@ private struct BrowserIcon: View {
             .resizable()
             .aspectRatio(contentMode: .fit)
             .frame(width: size, height: size)
+    }
+}
+
+private struct HotKeyRecorder: NSViewRepresentable {
+    @Binding var shortcut: String
+    var onRecord: (HotKey) -> Void
+
+    func makeNSView(context: Context) -> ShortcutRecorderButton {
+        let button = ShortcutRecorderButton()
+        button.bezelStyle = .rounded
+        button.title = shortcut.isEmpty ? "Record Shortcut" : shortcut
+        button.onShortcutChanged = { hotKey in
+            shortcut = hotKey.displayText
+            onRecord(hotKey)
+        }
+        return button
+    }
+
+    func updateNSView(_ nsView: ShortcutRecorderButton, context: Context) {
+        if !nsView.isRecording {
+            nsView.title = shortcut.isEmpty ? "Record Shortcut" : shortcut
+        }
+    }
+}
+
+private final class ShortcutRecorderButton: NSButton {
+    var onShortcutChanged: ((HotKey) -> Void)?
+    private(set) var isRecording = false
+    private var localMonitor: Any?
+
+    override func mouseDown(with event: NSEvent) {
+        startRecording()
+    }
+
+    private func startRecording() {
+        isRecording = true
+        title = "Recording..."
+        window?.makeFirstResponder(self)
+
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.record(event)
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        isRecording = false
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
+            self.localMonitor = nil
+        }
+    }
+
+    private func record(_ event: NSEvent) {
+        guard event.keyCode != 53 else {
+            stopRecording()
+            title = "Record Shortcut"
+            return
+        }
+
+        let shortcut = shortcutDescription(for: event)
+        let hotKey = HotKey(
+            keyCode: UInt32(event.keyCode),
+            modifiers: carbonModifiers(for: event.modifierFlags),
+            displayText: shortcut
+        )
+        onShortcutChanged?(hotKey)
+        title = hotKey.displayText
+        stopRecording()
+    }
+
+    private func shortcutDescription(for event: NSEvent) -> String {
+        var parts: [String] = []
+        if event.modifierFlags.contains(.control) { parts.append("⌃") }
+        if event.modifierFlags.contains(.option) { parts.append("⌥") }
+        if event.modifierFlags.contains(.shift) { parts.append("⇧") }
+        if event.modifierFlags.contains(.command) { parts.append("⌘") }
+
+        let key = event.charactersIgnoringModifiers?.uppercased() ?? ""
+        return (parts + [key]).joined(separator: " ")
+    }
+
+    private func carbonModifiers(for flags: NSEvent.ModifierFlags) -> UInt32 {
+        var modifiers: UInt32 = 0
+        if flags.contains(.command) { modifiers |= UInt32(cmdKey) }
+        if flags.contains(.option) { modifiers |= UInt32(optionKey) }
+        if flags.contains(.control) { modifiers |= UInt32(controlKey) }
+        if flags.contains(.shift) { modifiers |= UInt32(shiftKey) }
+        return modifiers
     }
 }

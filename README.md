@@ -7,6 +7,7 @@ default handler for HTTP and HTTPS links through Launch Services. It includes:
 
 - Menu bar browser switching
 - Current default browser detection
+- Automatic discovery of unsupported default browsers
 - Browser visibility settings
 - Menu bar icon modes
 - Keyboard shortcut field
