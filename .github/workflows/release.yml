@@ -18,12 +18,9 @@ jobs:
         run: swift build -c release
 
       - name: Create tarball
-        run: |
-          cd .build/release
-          tar czf "../../Switchbar-${GITHUB_REF_NAME}-arm64.tar.gz" Switchbar
+        run: tar czf Switchbar-${GITHUB_REF_NAME}-arm64.tar.gz -C .build/release Switchbar
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: Switchbar-*.tar.gz
-          generate_release_notes: true
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create ${GITHUB_REF_NAME} Switchbar-*.tar.gz --generate-notes
