@@ -18,13 +18,35 @@ struct FocusRule: Identifiable {
     var browserID: String
 }
 
+enum MenuBarIconMode: String, CaseIterable, Identifiable {
+    case `switch`
+    case globe
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .switch: "Switch"
+        case .globe: "Globe"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .switch: "arrow.left.arrow.right"
+        case .globe: "globe"
+        }
+    }
+}
+
 @MainActor
 final class BrowserModel: ObservableObject {
     private enum DefaultsKey {
         static let selectedBrowserID = "selectedBrowserID"
         static let hiddenBrowserIDs = "hiddenBrowserIDs"
         static let hidesMenuBarIcon = "hidesMenuBarIcon"
-        static let showsDefaultBrowserIcon = "showsDefaultBrowserIcon"
+        static let launchAtLogin = "launchAtLogin"
+        static let menuBarIconMode = "menuBarIconMode"
         static let globalShortcut = "globalShortcut"
     }
 
@@ -35,8 +57,9 @@ final class BrowserModel: ObservableObject {
         Browser(id: "arc", bundleIdentifiers: ["company.thebrowser.Browser"], name: "Arc", accent: .pink, isVisible: true, shortcut: "2"),
         Browser(id: "firefox", bundleIdentifiers: ["org.mozilla.firefox", "org.mozilla.nightly"], name: "Firefox Nightly", accent: .purple, isVisible: true, shortcut: "3"),
         Browser(id: "chrome", bundleIdentifiers: ["com.google.Chrome"], name: "Chrome", accent: .green, isVisible: true, shortcut: "4"),
-        Browser(id: "brave", bundleIdentifiers: ["com.brave.Browser"], name: "Brave", accent: .orange, isVisible: false, shortcut: "5"),
-        Browser(id: "edge", bundleIdentifiers: ["com.microsoft.edgemac"], name: "Microsoft Edge", accent: .cyan, isVisible: false, shortcut: "6")
+        Browser(id: "zen", bundleIdentifiers: ["app.zen-browser.zen"], name: "Zen", accent: .indigo, isVisible: true, shortcut: "5"),
+        Browser(id: "brave", bundleIdentifiers: ["com.brave.Browser"], name: "Brave", accent: .orange, isVisible: false, shortcut: "6"),
+        Browser(id: "edge", bundleIdentifiers: ["com.microsoft.edgemac"], name: "Microsoft Edge", accent: .cyan, isVisible: false, shortcut: "7")
     ] {
         didSet { notifyChanged() }
     }
@@ -49,7 +72,11 @@ final class BrowserModel: ObservableObject {
         didSet { notifyChanged() }
     }
 
-    @Published var showsDefaultBrowserIcon = true {
+    @Published var launchAtLogin = false {
+        didSet { notifyChanged() }
+    }
+
+    @Published var menuBarIconMode = MenuBarIconMode.switch {
         didSet { notifyChanged() }
     }
 
@@ -80,6 +107,11 @@ final class BrowserModel: ObservableObject {
 
     var visibleBrowsers: [Browser] {
         browsers.filter(\.isVisible)
+    }
+
+    var showsMenuBarIcon: Bool {
+        get { !hidesMenuBarIcon }
+        set { hidesMenuBarIcon = !newValue }
     }
 
     func choose(_ browser: Browser) {
@@ -131,19 +163,24 @@ final class BrowserModel: ObservableObject {
 
         let systemDefaultBrowserID = refreshSystemDefaultBrowser()
 
-        if let savedSelectedBrowserID = defaults.string(forKey: DefaultsKey.selectedBrowserID),
+        if let systemDefaultBrowserID {
+            selectedBrowserID = systemDefaultBrowserID
+        } else if let savedSelectedBrowserID = defaults.string(forKey: DefaultsKey.selectedBrowserID),
            browsers.contains(where: { $0.id == savedSelectedBrowserID }) {
             selectedBrowserID = savedSelectedBrowserID
-        } else if let systemDefaultBrowserID {
-            selectedBrowserID = systemDefaultBrowserID
         }
 
         if defaults.object(forKey: DefaultsKey.hidesMenuBarIcon) != nil {
             hidesMenuBarIcon = defaults.bool(forKey: DefaultsKey.hidesMenuBarIcon)
         }
 
-        if defaults.object(forKey: DefaultsKey.showsDefaultBrowserIcon) != nil {
-            showsDefaultBrowserIcon = defaults.bool(forKey: DefaultsKey.showsDefaultBrowserIcon)
+        if defaults.object(forKey: DefaultsKey.launchAtLogin) != nil {
+            launchAtLogin = defaults.bool(forKey: DefaultsKey.launchAtLogin)
+        }
+
+        if let savedMenuBarIconMode = defaults.string(forKey: DefaultsKey.menuBarIconMode),
+           let mode = MenuBarIconMode(rawValue: savedMenuBarIconMode) {
+            menuBarIconMode = mode
         }
 
         if let savedGlobalShortcut = defaults.string(forKey: DefaultsKey.globalShortcut) {
@@ -157,7 +194,7 @@ final class BrowserModel: ObservableObject {
         if systemDefaultBrowserName == selectedBrowser.name {
             statusMessage = "\(selectedBrowser.name) is the current macOS default browser."
         } else {
-            statusMessage = "\(selectedBrowser.name) is the simulated system default browser."
+            statusMessage = "\(selectedBrowser.name) is selected locally."
         }
     }
 
@@ -165,7 +202,8 @@ final class BrowserModel: ObservableObject {
         defaults.set(selectedBrowserID, forKey: DefaultsKey.selectedBrowserID)
         defaults.set(browsers.filter { !$0.isVisible }.map(\.id), forKey: DefaultsKey.hiddenBrowserIDs)
         defaults.set(hidesMenuBarIcon, forKey: DefaultsKey.hidesMenuBarIcon)
-        defaults.set(showsDefaultBrowserIcon, forKey: DefaultsKey.showsDefaultBrowserIcon)
+        defaults.set(launchAtLogin, forKey: DefaultsKey.launchAtLogin)
+        defaults.set(menuBarIconMode.rawValue, forKey: DefaultsKey.menuBarIconMode)
         defaults.set(globalShortcut, forKey: DefaultsKey.globalShortcut)
     }
 

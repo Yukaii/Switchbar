@@ -20,7 +20,7 @@ final class StatusController {
         if let button = statusItem.button {
             button.isHidden = model.hidesMenuBarIcon
             button.toolTip = "Switchbar"
-            button.image = NSImage(systemSymbolName: "globe", accessibilityDescription: "Switchbar")
+            button.image = NSImage(systemSymbolName: model.menuBarIconMode.systemImage, accessibilityDescription: "Switchbar")
             button.image?.isTemplate = true
         }
 
@@ -30,7 +30,7 @@ final class StatusController {
             item.target = self
             item.representedObject = browser.id
             item.state = browser.id == model.selectedBrowserID ? .on : .off
-            item.image = model.icon(for: browser)
+            item.image = menuIcon(for: browser, model: model)
             menu.addItem(item)
         }
 
@@ -62,6 +62,12 @@ final class StatusController {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         return item
+    }
+
+    private func menuIcon(for browser: Browser, model: BrowserModel) -> NSImage {
+        let image = model.icon(for: browser).copy() as? NSImage ?? model.icon(for: browser)
+        image.size = NSSize(width: 18, height: 18)
+        return image
     }
 
     @objc private func selectBrowser(_ sender: NSMenuItem) {

@@ -2,143 +2,180 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var model: BrowserModel
+    @State private var isConfiguringBrowsers = false
+    @State private var isRecordingShortcut = false
 
     var body: some View {
         VStack(spacing: 0) {
-            HeaderView()
+            Text("Default Browser Settings")
+                .font(.system(size: 19, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .overlay(alignment: .leading) {
+                    WindowControls()
+                }
+                .padding(.top, 18)
+                .padding(.horizontal, 18)
 
-            TabView {
-                GeneralPane()
-                    .tabItem { Label("General", systemImage: "gearshape") }
+            VStack(spacing: 0) {
+                SettingsRow("Launch at login") {
+                    Toggle("", isOn: $model.launchAtLogin)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
 
-                BrowsersPane()
-                    .tabItem { Label("Browsers", systemImage: "globe") }
+                Divider()
 
-                AutomationPane()
-                    .tabItem { Label("Automation", systemImage: "sparkles") }
+                SettingsRow("Show menu bar icon") {
+                    Toggle("", isOn: Binding(
+                        get: { model.showsMenuBarIcon },
+                        set: { model.showsMenuBarIcon = $0 }
+                    ))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                }
+
+                Divider()
+
+                SettingsRow("Menu bar icon") {
+                    Picker("", selection: $model.menuBarIconMode) {
+                        ForEach(MenuBarIconMode.allCases) { mode in
+                            Label(mode.title, systemImage: mode.systemImage)
+                                .tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(width: 150)
+                }
+
+                Divider()
+
+                SettingsRow("Shown browsers") {
+                    Button("Configure...") {
+                        isConfiguringBrowsers = true
+                    }
+                }
+
+                Divider()
+
+                SettingsRow("Toggle menu") {
+                    Button(isRecordingShortcut ? "Recording..." : "Record Shortcut") {
+                        isRecordingShortcut.toggle()
+                        model.globalShortcut = isRecordingShortcut ? "Recording..." : "⌥ Space"
+                    }
+                    .frame(width: 176)
+                    .disabled(isRecordingShortcut)
+                }
             }
-            .padding(.horizontal, 18)
-            .padding(.bottom, 18)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.white.opacity(0.16))
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.white.opacity(0.025))
+                    )
+            )
+            .padding(.horizontal, 28)
+            .padding(.top, 42)
+
+            Spacer(minLength: 24)
         }
-        .background(.regularMaterial)
+        .frame(width: 475, height: 315)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .preferredColorScheme(.dark)
+        .sheet(isPresented: $isConfiguringBrowsers) {
+            BrowserConfigurationSheet()
+                .environmentObject(model)
+        }
     }
 }
 
-private struct HeaderView: View {
-    @EnvironmentObject private var model: BrowserModel
+private struct SettingsRow<Accessory: View>: View {
+    private let title: String
+    private let accessory: Accessory
+
+    init(_ title: String, @ViewBuilder accessory: () -> Accessory) {
+        self.title = title
+        self.accessory = accessory()
+    }
 
     var body: some View {
-        HStack(spacing: 16) {
-            Image(systemName: "globe")
-                .font(.system(size: 38, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 72, height: 72)
-                .background(
-                    LinearGradient(colors: [.indigo, .purple], startPoint: .topLeading, endPoint: .bottomTrailing),
-                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                )
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Switchbar")
-                    .font(.system(size: 28, weight: .bold))
-                Text("Switch browsers from the menu bar, keyboard, Focus, or Shortcuts.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                if let systemDefaultBrowserName = model.systemDefaultBrowserName {
-                    Text("macOS default: \(systemDefaultBrowserName)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Text(model.statusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
+        HStack(spacing: 14) {
+            Text(title)
+                .font(.system(size: 19, weight: .medium))
+                .foregroundStyle(.primary)
 
             Spacer()
+
+            accessory
+                .controlSize(.large)
         }
-        .padding(24)
+        .frame(height: 52)
     }
 }
 
-private struct GeneralPane: View {
-    @EnvironmentObject private var model: BrowserModel
-
+private struct WindowControls: View {
     var body: some View {
-        Form {
-            Picker("Default browser", selection: $model.selectedBrowserID) {
-                ForEach(model.browsers) { browser in
-                    Label {
-                        Text(browser.name)
-                    } icon: {
-                        BrowserIcon(browser: browser, size: 16)
-                    }
-                        .tag(browser.id)
-                }
-            }
-            .onChange(of: model.selectedBrowserID) { _, id in
-                if let browser = model.browsers.first(where: { $0.id == id }) {
-                    model.choose(browser)
-                }
-            }
-
-            Toggle("Hide menu bar icon", isOn: $model.hidesMenuBarIcon)
-            Toggle("Show the default browser's icon in the menu bar", isOn: $model.showsDefaultBrowserIcon)
-
-            HStack {
-                Text("macOS default browser")
-                Spacer()
-                Text(model.systemDefaultBrowserName ?? "Unknown")
-                    .foregroundStyle(.secondary)
-                Button("Refresh") {
-                    _ = model.refreshSystemDefaultBrowser()
-                }
-            }
-
-            HStack {
-                Text("Keyboard shortcut")
-                Spacer()
-                TextField("Shortcut", text: $model.globalShortcut)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 120)
-            }
+        HStack(spacing: 12) {
+            Circle()
+                .fill(Color(red: 1.0, green: 0.37, blue: 0.34))
+            Circle()
+                .fill(Color.white.opacity(0.16))
+            Circle()
+                .fill(Color.white.opacity(0.16))
         }
-        .formStyle(.grouped)
+        .frame(width: 76, height: 18)
     }
 }
 
-private struct BrowsersPane: View {
+private struct BrowserConfigurationSheet: View {
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var model: BrowserModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Choose which browsers appear in the menu.")
-                .foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            HStack {
+                Text("Shown Browsers")
+                    .font(.headline)
+                Spacer()
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(20)
 
             List {
                 ForEach(model.browsers) { browser in
                     HStack(spacing: 12) {
+                        BrowserIcon(browser: browser, size: 24)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(browser.name)
+                            if model.installedApplicationURL(for: browser) == nil {
+                                Text("Not installed")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Spacer()
+
                         Toggle("", isOn: Binding(
                             get: { browser.isVisible },
                             set: { _ in model.toggleVisibility(for: browser) }
                         ))
                         .labelsHidden()
-
-                        BrowserIcon(browser: browser, size: 24)
-                            .frame(width: 28)
-
-                        Text(browser.name)
-                        Spacer()
-                        Text(browser.shortcut)
-                            .foregroundStyle(.secondary)
-                            .monospaced()
                     }
                     .padding(.vertical, 4)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .scrollContentBackground(.hidden)
         }
-        .padding(.top, 12)
+        .frame(width: 360, height: 360)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
@@ -153,55 +190,5 @@ private struct BrowserIcon: View {
             .resizable()
             .aspectRatio(contentMode: .fit)
             .frame(width: size, height: size)
-    }
-}
-
-private struct AutomationPane: View {
-    @EnvironmentObject private var model: BrowserModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            GroupBox("Shortcuts") {
-                VStack(alignment: .leading, spacing: 10) {
-                    automationRow("Set Browser", detail: "Receives a browser name and switches locally.")
-                    automationRow("Get Browser", detail: "Returns \(model.selectedBrowser.name).")
-                    Button("Run Set Browser") {
-                        model.runShortcutAction(named: "Set Browser")
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            GroupBox("Focus filters") {
-                VStack(spacing: 8) {
-                    ForEach(model.focusRules) { rule in
-                        HStack {
-                            Text(rule.focus)
-                            Spacer()
-                            Text(model.browsers.first(where: { $0.id == rule.browserID })?.name ?? "Unknown")
-                                .foregroundStyle(.secondary)
-                            Button("Apply") {
-                                model.applyFocus(rule)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .padding(.top, 12)
-    }
-
-    private func automationRow(_ title: String, detail: String) -> some View {
-        HStack {
-            Image(systemName: "slider.horizontal.3")
-                .foregroundStyle(.purple)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-        }
     }
 }

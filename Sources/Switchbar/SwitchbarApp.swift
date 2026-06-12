@@ -10,7 +10,6 @@ struct SwitchbarApp: App {
         Settings {
             SettingsView()
                 .environmentObject(model)
-                .frame(width: 560, height: 500)
         }
         .commands {
             CommandGroup(replacing: .appSettings) {
