@@ -2,8 +2,8 @@
 
 A native macOS menu bar utility inspired by Sindre Sorhus' Default Browser app.
 
-Switchbar reads the current macOS default browser and can ask macOS to set a
-new default handler for HTTP and HTTPS links. It includes:
+Switchbar reads the current macOS default browser and can silently request a new
+default handler for HTTP and HTTPS links through Launch Services. It includes:
 
 - Menu bar browser switching
 - Current default browser detection

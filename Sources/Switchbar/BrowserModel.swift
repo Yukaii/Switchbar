@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -185,33 +186,33 @@ final class BrowserModel: ObservableObject {
     }
 
     private func setSystemDefaultBrowser(_ browser: Browser) {
-        guard let applicationURL = installedApplicationURL(for: browser) else {
+        guard installedApplicationURL(for: browser) != nil else {
             statusMessage = "\(browser.name) is not installed, so macOS default was not changed."
             return
         }
 
-        statusMessage = "Setting macOS default browser to \(browser.name)..."
+        let bundleIdentifier = browser.bundleIdentifiers.first {
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) != nil
+        }
 
-        setDefaultApplication(applicationURL, for: "http") { [weak self] error in
-            guard let self else { return }
+        guard let bundleIdentifier else {
+            statusMessage = "\(browser.name) is not installed, so macOS default was not changed."
+            return
+        }
 
-            if let error {
-                self.statusMessage = "macOS did not change the default browser: \(error.localizedDescription)"
-                return
-            }
+        let httpStatus = LSSetDefaultHandlerForURLScheme("http" as CFString, bundleIdentifier as CFString)
+        let httpsStatus = LSSetDefaultHandlerForURLScheme("https" as CFString, bundleIdentifier as CFString)
 
-            self.setDefaultApplication(applicationURL, for: "https") { [weak self] error in
-                guard let self else { return }
+        guard httpStatus == noErr, httpsStatus == noErr else {
+            statusMessage = "macOS did not change the default browser. HTTP status: \(httpStatus), HTTPS status: \(httpsStatus)."
+            return
+        }
 
-                if let error {
-                    self.statusMessage = "macOS changed HTTP but not HTTPS: \(error.localizedDescription)"
-                    return
-                }
-
-                self.systemDefaultBrowserName = browser.name
-                self.statusMessage = "\(browser.name) is now the macOS default browser."
-                _ = self.refreshSystemDefaultBrowser()
-            }
+        let refreshedBrowserID = refreshSystemDefaultBrowser()
+        if refreshedBrowserID == browser.id {
+            statusMessage = "\(browser.name) is now the macOS default browser."
+        } else {
+            statusMessage = "macOS accepted the request, but the current default did not change to \(browser.name)."
         }
     }
 
@@ -221,18 +222,4 @@ final class BrowserModel: ObservableObject {
         }.first
     }
 
-    private func setDefaultApplication(
-        _ applicationURL: URL,
-        for scheme: String,
-        completion: @escaping @MainActor (Error?) -> Void
-    ) {
-        NSWorkspace.shared.setDefaultApplication(
-            at: applicationURL,
-            toOpenURLsWithScheme: scheme
-        ) { error in
-            Task { @MainActor in
-                completion(error)
-            }
-        }
-    }
 }
