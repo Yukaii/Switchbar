@@ -20,10 +20,10 @@ jobs:
       - name: Create tarball
         run: |
           cd .build/release
-          tar czf ../../Switchbar-${GITHUB_REF_NAME}-arm64.tar.gz Switchbar
+          tar czf "../../Switchbar-${GITHUB_REF_NAME}-arm64.tar.gz" Switchbar
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: Switchbar-${{ github.ref_name }}-arm64.tar.gz
+          files: Switchbar-*.tar.gz
           generate_release_notes: true
