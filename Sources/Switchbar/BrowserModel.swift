@@ -3,6 +3,7 @@ import Carbon
 import CoreServices
 import Darwin
 import os
+import ServiceManagement
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -104,7 +105,10 @@ final class BrowserModel: ObservableObject {
     }
 
     @Published var launchAtLogin = false {
-        didSet { notifyChanged() }
+        didSet {
+            setLoginItemEnabled(launchAtLogin)
+            notifyChanged()
+        }
     }
 
     @Published var menuBarIconMode = MenuBarIconMode.switch {
@@ -304,6 +308,7 @@ final class BrowserModel: ObservableObject {
         }
 
         preregisterBrowsers()
+        setLoginItemEnabled(launchAtLogin)
     }
 
     private func preregisterBrowsers() {
@@ -495,6 +500,19 @@ final class BrowserModel: ObservableObject {
         browser.bundleIdentifiers.lazy.compactMap {
             NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)
         }.first
+    }
+
+    private func setLoginItemEnabled(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            logger.info("Login item \(enabled ? "registered" : "unregistered", privacy: .public)")
+        } catch {
+            logger.error("Failed to update login item: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func setLaunchServicesHandlersSilently(to bundleIdentifier: String) -> Bool {
