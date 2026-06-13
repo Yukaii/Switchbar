@@ -18,15 +18,26 @@ Inspired by [Default Browser](https://sindresorhus.com/default-browser) by Sindr
 ### Homebrew
 
 ```sh
-brew tap Yukaii/switchbar
+brew tap Yukaii/tap
 brew install switchbar
 ```
 
 To auto-start on login:
 
 ```sh
-cp "$(brew --prefix switchbar)/com.yukaii.switchbar.plist" ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.yukaii.switchbar.plist
+brew services start switchbar
+```
+
+To stop auto-starting:
+
+```sh
+brew services stop switchbar
+```
+
+To install the latest unreleased version from `main`:
+
+```sh
+brew install switchbar --HEAD
 ```
 
 ### Build from source
