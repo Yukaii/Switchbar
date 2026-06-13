@@ -180,6 +180,19 @@ final class BrowserModel: ObservableObject {
         browsers.swapAt(currentIndex, newIndex)
     }
 
+    func moveBrowser(id: String, to targetID: String) {
+        guard
+            let sourceIndex = browsers.firstIndex(where: { $0.id == id }),
+            let targetIndex = browsers.firstIndex(where: { $0.id == targetID }),
+            sourceIndex != targetIndex
+        else { return }
+
+        browsers.move(
+            fromOffsets: IndexSet(integer: sourceIndex),
+            toOffset: targetIndex > sourceIndex ? targetIndex + 1 : targetIndex
+        )
+    }
+
     func addBrowser(from applicationURL: URL) {
         guard
             applicationURL.pathExtension == "app",

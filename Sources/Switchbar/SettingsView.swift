@@ -119,12 +119,18 @@ private struct SettingsRow<Accessory: View>: View {
 private struct BrowserConfigurationSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var model: BrowserModel
+    @State private var draggedBrowserID: String?
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Shown Browsers")
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Shown Browsers")
+                        .font(.headline)
+                    Text("Drag rows to reorder")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button {
                     addBrowser()
@@ -179,6 +185,21 @@ private struct BrowserConfigurationSheet: View {
                         .labelsHidden()
                     }
                     .padding(.vertical, 4)
+                    .onDrag {
+                        draggedBrowserID = browser.id
+                        return NSItemProvider(object: browser.id as NSString)
+                    }
+                    .onDrop(
+                        of: [.text],
+                        delegate: BrowserDropDelegate(
+                            targetBrowser: browser,
+                            draggedBrowserID: $draggedBrowserID,
+                            model: model
+                        )
+                    )
+                }
+                .onMove { offsets, destination in
+                    model.moveBrowsers(from: offsets, to: destination)
                 }
             }
             .scrollContentBackground(.hidden)
@@ -198,6 +219,29 @@ private struct BrowserConfigurationSheet: View {
         if panel.runModal() == .OK, let url = panel.url {
             model.addBrowser(from: url)
         }
+    }
+}
+
+private struct BrowserDropDelegate: DropDelegate {
+    let targetBrowser: Browser
+    @Binding var draggedBrowserID: String?
+    let model: BrowserModel
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedBrowserID, draggedBrowserID != targetBrowser.id else { return }
+
+        withAnimation {
+            model.moveBrowser(id: draggedBrowserID, to: targetBrowser.id)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedBrowserID = nil
+        return true
     }
 }
 
