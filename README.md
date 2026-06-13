@@ -2,7 +2,9 @@
 
 A native macOS menu bar utility for quickly switching your default browser.
 
-Inspired by [Default Browser](https://sindresorhus.com/default-browser) by Sindre Sorhus.
+Switchbar is a lightweight clone inspired by [Default Browser](https://sindresorhus.com/default-browser) by Sindre Sorhus. It intentionally implements only a small subset of Default Browser's functionality: fast menu bar switching, browser visibility settings, and local preferences.
+
+For the full-featured app, including the broader automation and scripting workflow, use [Default Browser](https://sindresorhus.com/default-browser) instead.
 
 ## Features
 
@@ -55,7 +57,9 @@ Select a browser by clicking or pressing its number key (1-9).
 
 ## Reference
 
-This project is inspired by [Default Browser](https://sindresorhus.com/default-browser) by Sindre Sorhus. See the [scripting section](https://sindresorhus.com/default-browser#scripting) for ideas on automating browser switching with Shortcuts, Focus filters, and more.
+This project is inspired by [Default Browser](https://sindresorhus.com/default-browser) by Sindre Sorhus, but it is not a full replacement. If you need the complete feature set, use [Default Browser](https://sindresorhus.com/default-browser).
+
+See Default Browser's [scripting section](https://sindresorhus.com/default-browser#scripting) for its automation support with Shortcuts, Focus filters, and more.
 
 ## License
 
