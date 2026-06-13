@@ -4,6 +4,22 @@ import SwiftUI
 @MainActor
 final class StatusController {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let menuAnchorWindow: NSPanel = {
+        let window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        window.backgroundColor = .clear
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.isOpaque = false
+        window.level = .popUpMenu
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        return window
+    }()
     private weak var model: BrowserModel?
 
     func bind(_ model: BrowserModel) {
@@ -16,9 +32,37 @@ final class StatusController {
     }
 
     func showMenu() {
-        guard let button = statusItem.button else { return }
-        statusItem.menu = statusItem.menu ?? NSMenu()
-        button.performClick(nil)
+        guard let menu = statusItem.menu else { return }
+        menuAnchorWindow.setFrameOrigin(menuAnchorLocation())
+        menuAnchorWindow.orderFrontRegardless()
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 1), in: menuAnchorWindow.contentView)
+        menuAnchorWindow.orderOut(nil)
+    }
+
+    private func menuAnchorLocation() -> NSPoint {
+        if let button = statusItem.button, let window = button.window, !button.isHidden {
+            let buttonFrame = button.convert(button.bounds, to: nil)
+            let screenFrame = window.convertToScreen(buttonFrame)
+            if isUsableMenuBarFrame(screenFrame) {
+                return NSPoint(x: screenFrame.midX, y: screenFrame.minY - 8)
+            }
+        }
+
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) } ?? NSScreen.main
+        guard let screen else { return mouseLocation }
+
+        return NSPoint(x: screen.frame.maxX - 260, y: screen.visibleFrame.maxY - 8)
+    }
+
+    private func isUsableMenuBarFrame(_ frame: NSRect) -> Bool {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.intersects(frame) }) else { return false }
+        let menuBarHeight = screen.frame.maxY - screen.visibleFrame.maxY
+
+        return frame.midX > screen.frame.midX
+            && frame.minY >= screen.visibleFrame.maxY - 2
+            && frame.maxY <= screen.frame.maxY + 2
+            && frame.height <= menuBarHeight + 8
     }
 
     private func rebuildMenu() {
