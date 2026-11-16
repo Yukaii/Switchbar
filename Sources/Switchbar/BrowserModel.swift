@@ -98,6 +98,13 @@ final class BrowserModel: ObservableObject {
         "com.microsoft.edgemac": "edge"
     ]
 
+    /// ⌥⇧B. Only used when no shortcut has been saved; existing users keep theirs.
+    static let defaultHotKey = HotKey(
+        keyCode: UInt32(kVK_ANSI_B),
+        modifiers: UInt32(optionKey | shiftKey),
+        displayText: "⌥ ⇧ B"
+    )
+
     /// Defaults domain used when Switchbar ran as a bare, un-bundled executable.
     private static let legacyDefaultsDomain = "Switchbar"
 
@@ -138,7 +145,7 @@ final class BrowserModel: ObservableObject {
         didSet { notifyChanged() }
     }
 
-    @Published var globalShortcut = "⌥ Space" {
+    @Published var globalShortcut = BrowserModel.defaultHotKey.displayText {
         didSet { notifyChanged() }
     }
 
@@ -507,7 +514,7 @@ final class BrowserModel: ObservableObject {
             globalHotKey = savedHotKey
             globalShortcut = savedHotKey.displayText
         } else {
-            globalHotKey = HotKey(keyCode: 49, modifiers: UInt32(optionKey), displayText: "⌥ Space")
+            globalHotKey = Self.defaultHotKey
         }
 
         if let selectedBrowser {

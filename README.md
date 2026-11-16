@@ -12,7 +12,7 @@ For the full-featured app, including the broader automation and scripting workfl
 
 ## Features
 
-- Menu bar browser switching with a global keyboard shortcut (Option+Space by default)
+- Menu bar browser switching with a global keyboard shortcut (Option+Shift+B by default)
 - Automatic detection of every installed browser, including Orion web app profiles and other less common browsers
 - Detects default-browser changes made in System Settings or by a browser itself
 - Drag-and-drop ordering. Drop any app onto the list to add it
@@ -69,7 +69,7 @@ See [docs/releasing.md](docs/releasing.md) for signing, notarization and the rel
 
 ## Usage
 
-Switchbar appears in the macOS menu bar. Click it to see your browsers, or press **Option+Space** to open the menu from anywhere.
+Switchbar appears in the macOS menu bar. Click it to see your browsers, or press **Option+Shift+B** to open the menu from anywhere.
 
 Select a browser by clicking or pressing its number key (1-9).
 
