@@ -1,26 +1,160 @@
 name: Release
 
+# Builds a universal, Developer ID–signed and notarized Switchbar.app plus the
+# standalone binary used by the Homebrew formula, and publishes both to the
+# GitHub release for the tag.
+#
+# Push a `v*` tag to release it, or run this workflow manually with an existing
+# tag to rebuild that version (for example, to re-publish an older release
+# notarized). Manual runs build the tag's sources with this branch's packaging
+# scripts, and replace the release's existing assets.
+#
+# Signing and notarization secrets (all optional; without them the build is
+# ad-hoc signed and a warning is shown on the run):
+#   DEVELOPER_ID_CERTIFICATE_P12_BASE64  base64 of a "Developer ID Application" .p12
+#   DEVELOPER_ID_CERTIFICATE_PASSWORD    password for that .p12
+#   NOTARY_API_KEY_P8_BASE64             base64 of an App Store Connect API key (.p8)
+#   NOTARY_API_KEY_ID                    the key's ID
+#   NOTARY_API_ISSUER_ID                 the key's issuer ID
+
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v1.0.1"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  build:
+  release:
     runs-on: macos-15
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out packaging scripts
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Build release binary
-        run: swift build -c release
+      - name: Check out release sources
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          path: release-source
+          fetch-depth: 0
 
-      - name: Create tarball
-        run: tar czf Switchbar-${GITHUB_REF_NAME}-arm64.tar.gz -C .build/release Switchbar
+      - name: Resolve version
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            source_dir="$PWD/release-source"
+          else
+            source_dir="$PWD"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "::error::Tag '$TAG' must look like v1.2.3"
+            exit 1
+          fi
+          {
+            echo "SOURCE_DIR=$source_dir"
+            echo "VERSION=${TAG#v}"
+            echo "BUILD_NUMBER=$(git -C "$source_dir" rev-list --count HEAD)"
+          } >> "$GITHUB_ENV"
 
-      - name: Upload to GitHub Release
+      - name: Import Developer ID certificate
+        id: signing
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+        run: |
+          if [[ -z "$CERTIFICATE_P12_BASE64" ]]; then
+            echo "::warning::DEVELOPER_ID_CERTIFICATE_P12_BASE64 is not set; building ad-hoc signed (Gatekeeper will block it on other Macs)."
+            echo "identity=-" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+
+          echo "$CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          # Prepend to the search list so codesign finds the identity.
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | awk '/Developer ID Application/ { print $2; exit }')"
+          if [[ -z "$identity" ]]; then
+            echo "::error::The certificate does not contain a 'Developer ID Application' identity."
+            exit 1
+          fi
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+
+      - name: Build app
+        env:
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+        run: scripts/build-app.sh
+
+      - name: Notarize
+        if: steps.signing.outputs.identity != '-'
+        env:
+          NOTARY_API_KEY_P8_BASE64: ${{ secrets.NOTARY_API_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+        run: |
+          if [[ -z "$NOTARY_API_KEY_P8_BASE64" || -z "$NOTARY_KEY_ID" || -z "$NOTARY_ISSUER_ID" ]]; then
+            echo "::warning::Notary API key secrets are not set; publishing a signed but un-notarized build."
+            exit 0
+          fi
+          export NOTARY_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          echo "$NOTARY_API_KEY_P8_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+          trap 'rm -f "$NOTARY_KEY_PATH"' EXIT
+          scripts/notarize.sh
+
+      - name: Package
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent Switchbar.app "Switchbar-$TAG.zip"
+          tar -czf "Switchbar-$TAG-universal.tar.gz" Switchbar
+          shasum -a 256 "Switchbar-$TAG.zip" "Switchbar-$TAG-universal.tar.gz" | tee checksums.txt
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Switchbar-${{ env.TAG }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/checksums.txt
+
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create ${GITHUB_REF_NAME} Switchbar-*.tar.gz --generate-notes
+        run: |
+          assets=("dist/Switchbar-$TAG.zip" "dist/Switchbar-$TAG-universal.tar.gz" "dist/checksums.txt")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; replacing its assets"
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" --verify-tag --generate-notes
+          fi
+
+      - name: Remove signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
