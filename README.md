@@ -2,7 +2,7 @@
 
 A native macOS menu bar utility for quickly switching your default browser.
 
-**Website:** https://yukaii.github.io/Switchbar/
+**Website:** https://switchbar.yukai.dev/
 
 <img src="site/images/menu.png" width="240" alt="Switchbar menu">
 

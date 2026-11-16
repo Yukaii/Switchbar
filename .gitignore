@@ -19,3 +19,6 @@ DerivedData/
 .vscode/
 .idea/
 dist/
+
+# Cloudflare CLI local cache
+.cloudflare/
