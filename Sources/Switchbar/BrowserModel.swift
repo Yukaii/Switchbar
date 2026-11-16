@@ -11,9 +11,10 @@ struct Browser: Identifiable, Equatable {
     let id: String
     let bundleIdentifiers: [String]
     var name: String
-    var accent: Color
     var isVisible: Bool
-    var shortcut: String
+    /// Added by hand (or adopted as the system default) rather than found by the
+    /// installed-browser scan. Custom entries are persisted and can be removed.
+    var isCustom = false
 }
 
 struct FocusRule: Identifiable {
@@ -32,7 +33,15 @@ private struct StoredBrowser: Codable {
     let id: String
     let bundleIdentifier: String
     let name: String
-    let shortcut: String
+    // Kept optional so preferences written by 1.0.x still decode.
+    let shortcut: String?
+}
+
+/// An app that LaunchServices reports as able to open web pages.
+struct InstalledBrowserApp: Sendable {
+    let bundleIdentifier: String
+    let url: URL
+    let name: String
 }
 
 enum MenuBarIconMode: String, CaseIterable, Identifiable {
@@ -68,6 +77,7 @@ final class BrowserModel: ObservableObject {
         static let globalHotKey = "globalHotKey"
         static let discoveredBrowsers = "discoveredBrowsers"
         static let browserOrder = "browserOrder"
+        static let migratedLegacyDefaults = "migratedLegacyDefaults"
     }
 
     private enum LaunchServices {
@@ -76,23 +86,36 @@ final class BrowserModel: ObservableObject {
         static let lsregisterPath = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
     }
 
+    /// IDs used by Switchbar 1.0.x's hardcoded browser list. Mapping these bundle
+    /// identifiers back to their old IDs keeps saved order/visibility intact.
+    private static let legacyBrowserIDs = [
+        "com.apple.Safari": "safari",
+        "company.thebrowser.Browser": "arc",
+        "org.mozilla.firefox": "firefox",
+        "com.google.Chrome": "chrome",
+        "app.zen-browser.zen": "zen",
+        "com.brave.Browser": "brave",
+        "com.microsoft.edgemac": "edge"
+    ]
+
+    /// Defaults domain used when Switchbar ran as a bare, un-bundled executable.
+    private static let legacyDefaultsDomain = "Switchbar"
+
     private let defaults: UserDefaults
-    nonisolated private let logger = Logger(subsystem: "com.switchbar.app", category: "DefaultBrowser")
+    nonisolated private let logger = Logger(subsystem: AppInfo.bundleIdentifier, category: "DefaultBrowser")
     private var isSwitchingDefaultBrowser = false
     private var pendingBrowserSwitch: Browser?
     private var switchStartTime: CFAbsoluteTime?
     private var progressTask: Task<Void, Never>?
     private var isLoadingPreferences = false
 
-    @Published var browsers: [Browser] = [
-        Browser(id: "safari", bundleIdentifiers: ["com.apple.Safari"], name: "Safari", accent: .blue, isVisible: true, shortcut: "1"),
-        Browser(id: "arc", bundleIdentifiers: ["company.thebrowser.Browser"], name: "Arc", accent: .pink, isVisible: true, shortcut: "2"),
-        Browser(id: "firefox", bundleIdentifiers: ["org.mozilla.firefox", "org.mozilla.nightly"], name: "Firefox Nightly", accent: .purple, isVisible: true, shortcut: "3"),
-        Browser(id: "chrome", bundleIdentifiers: ["com.google.Chrome"], name: "Chrome", accent: .green, isVisible: true, shortcut: "4"),
-        Browser(id: "zen", bundleIdentifiers: ["app.zen-browser.zen"], name: "Zen", accent: .indigo, isVisible: true, shortcut: "5"),
-        Browser(id: "brave", bundleIdentifiers: ["com.brave.Browser"], name: "Brave", accent: .orange, isVisible: false, shortcut: "6"),
-        Browser(id: "edge", bundleIdentifiers: ["com.microsoft.edgemac"], name: "Microsoft Edge", accent: .cyan, isVisible: false, shortcut: "7")
-    ] {
+    /// Hidden/order state for browsers that are not currently installed, so that
+    /// uninstalling and reinstalling a browser does not reset its settings.
+    private var savedHiddenBrowserIDs: Set<String> = []
+    private var savedBrowserOrder: [String] = []
+    private var iconCache: [String: NSImage] = [:]
+
+    @Published var browsers: [Browser] = [] {
         didSet { notifyChanged() }
     }
 
@@ -123,7 +146,7 @@ final class BrowserModel: ObservableObject {
         didSet { notifyChanged() }
     }
 
-    @Published var statusMessage = "Safari is the simulated system default browser."
+    @Published var statusMessage = ""
     @Published private(set) var systemDefaultBrowserName: String?
     @Published var focusRules: [FocusRule] = [
         FocusRule(focus: "Work", browserID: "arc"),
@@ -137,20 +160,34 @@ final class BrowserModel: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        if defaults == .standard {
+            migrateLegacyDefaultsIfNeeded()
+        }
         loadPreferences()
     }
 
-    var selectedBrowser: Browser {
-        browsers.first(where: { $0.id == selectedBrowserID }) ?? browsers[0]
+    var selectedBrowser: Browser? {
+        browsers.first(where: { $0.id == selectedBrowserID })
     }
 
     var visibleBrowsers: [Browser] {
         browsers.filter(\.isVisible)
     }
 
+    /// Browsers that should appear in the switcher menu, in order. Number keys
+    /// 1–9 map onto this list.
+    var menuBrowsers: [Browser] {
+        visibleBrowsers.filter { installedApplicationURL(for: $0) != nil }
+    }
+
     var showsMenuBarIcon: Bool {
         get { !hidesMenuBarIcon }
         set { hidesMenuBarIcon = !newValue }
+    }
+
+    /// Whether `SMAppService.mainApp` can work, which needs a real `.app` bundle.
+    var canLaunchAtLogin: Bool {
+        Bundle.main.bundleURL.pathExtension == "app"
     }
 
     func choose(_ browser: Browser) {
@@ -161,12 +198,27 @@ final class BrowserModel: ObservableObject {
         setSystemDefaultBrowser(browser)
     }
 
-    func toggleVisibility(for browser: Browser) {
-        guard let index = browsers.firstIndex(of: browser) else { return }
-        browsers[index].isVisible.toggle()
-        if !browsers[index].isVisible && browsers[index].id == selectedBrowserID {
-            selectedBrowserID = visibleBrowsers.first?.id ?? browsers[index].id
+    /// Re-scan installed browsers and re-read the real macOS default, so the menu
+    /// reflects changes made elsewhere (System Settings, a browser's own
+    /// "make default" prompt, installs and uninstalls).
+    func refresh() {
+        refreshInstalledBrowsers()
+
+        guard !isSwitchingDefaultBrowser, pendingBrowserSwitch == nil else { return }
+        guard let systemDefaultBrowserID = refreshSystemDefaultBrowser() else { return }
+
+        if systemDefaultBrowserID != selectedBrowserID {
+            logger.info("refresh: system default changed externally to \(systemDefaultBrowserID, privacy: .public)")
+            selectedBrowserID = systemDefaultBrowserID
+            if let selectedBrowser {
+                statusMessage = "\(selectedBrowser.name) is the current macOS default browser."
+            }
         }
+    }
+
+    func toggleVisibility(for browser: Browser) {
+        guard let index = browsers.firstIndex(where: { $0.id == browser.id }) else { return }
+        browsers[index].isVisible.toggle()
     }
 
     func moveBrowsers(from offsets: IndexSet, to destination: Int) {
@@ -180,20 +232,21 @@ final class BrowserModel: ObservableObject {
         browsers.swapAt(currentIndex, newIndex)
     }
 
-    func moveBrowser(id: String, to targetID: String) {
-        guard
-            let sourceIndex = browsers.firstIndex(where: { $0.id == id }),
-            let targetIndex = browsers.firstIndex(where: { $0.id == targetID }),
-            sourceIndex != targetIndex
-        else { return }
-
-        browsers.move(
-            fromOffsets: IndexSet(integer: sourceIndex),
-            toOffset: targetIndex > sourceIndex ? targetIndex + 1 : targetIndex
-        )
+    func moveBrowserToTop(id: String) {
+        guard let index = browsers.firstIndex(where: { $0.id == id }), index > 0 else { return }
+        browsers.move(fromOffsets: IndexSet(integer: index), toOffset: 0)
     }
 
-    func addBrowser(from applicationURL: URL) {
+    func removeBrowser(id: String) {
+        guard let browser = browsers.first(where: { $0.id == id }), browser.isCustom else { return }
+        browsers.removeAll { $0.id == id }
+        if selectedBrowserID == id, let first = menuBrowsers.first {
+            selectedBrowserID = first.id
+        }
+        statusMessage = "Removed \(browser.name) from the browser list."
+    }
+
+    func addBrowser(from applicationURL: URL, at index: Int? = nil) {
         guard
             applicationURL.pathExtension == "app",
             let bundleIdentifier = Bundle(url: applicationURL)?.bundleIdentifier
@@ -202,20 +255,25 @@ final class BrowserModel: ObservableObject {
             return
         }
 
-        if let existingBrowser = browserMatching(bundleIdentifier: bundleIdentifier) {
-            statusMessage = "\(existingBrowser.name) is already in the browser list."
+        if let existingIndex = browsers.firstIndex(where: { $0.bundleIdentifiers.contains(bundleIdentifier) }) {
+            // Dropping an existing browser re-positions it and makes sure it is shown.
+            var existing = browsers[existingIndex]
+            existing.isVisible = true
+            browsers.remove(at: existingIndex)
+            let target = min(index.map { $0 > existingIndex ? $0 - 1 : $0 } ?? existingIndex, browsers.count)
+            browsers.insert(existing, at: target)
+            statusMessage = "\(existing.name) is already in the browser list."
             return
         }
 
         let browser = Browser(
-            id: discoveredBrowserID(for: bundleIdentifier),
+            id: browserID(for: bundleIdentifier),
             bundleIdentifiers: [bundleIdentifier],
-            name: displayName(for: applicationURL),
-            accent: .gray,
+            name: Self.displayName(for: applicationURL),
             isVisible: true,
-            shortcut: nextAvailableShortcut()
+            isCustom: true
         )
-        browsers.append(browser)
+        browsers.insert(browser, at: min(index ?? browsers.count, browsers.count))
         statusMessage = "Added \(browser.name) to the browser list."
     }
 
@@ -227,7 +285,7 @@ final class BrowserModel: ObservableObject {
     func applyFocus(_ focusRule: FocusRule) {
         if let browser = browsers.first(where: { $0.id == focusRule.browserID }) {
             choose(browser)
-            statusMessage = "\(focusRule.focus) Focus switched the simulated default to \(browser.name)."
+            statusMessage = "\(focusRule.focus) Focus switched the default to \(browser.name)."
         }
     }
 
@@ -240,8 +298,13 @@ final class BrowserModel: ObservableObject {
             return NSWorkspace.shared.icon(for: .applicationBundle)
         }
 
+        if let cached = iconCache[applicationURL.path] {
+            return cached
+        }
+
         let image = NSWorkspace.shared.icon(forFile: applicationURL.path)
         image.size = NSSize(width: 32, height: 32)
+        iconCache[applicationURL.path] = image
         return image
     }
 
@@ -251,34 +314,176 @@ final class BrowserModel: ObservableObject {
         onChange?()
     }
 
+    // MARK: - Installed browser discovery
+
+    /// Asks LaunchServices for every app that can open web pages and filters the
+    /// result down to things that are plausibly browsers.
+    ///
+    /// LaunchServices happily reports apps that only claim `https` for deep links
+    /// (terminals, chat apps, automation tools) and stale copies of real browsers
+    /// (Playwright caches, updater staging folders). An app counts as a browser
+    /// when it handles `http`, `https` *and* `public.html`, and lives somewhere a
+    /// user would actually launch it from.
+    nonisolated static func scanInstalledBrowsers() -> [InstalledBrowserApp] {
+        let workspace = NSWorkspace.shared
+        guard
+            let httpsURL = URL(string: "https://example.com"),
+            let httpURL = URL(string: "http://example.com")
+        else { return [] }
+
+        func bundleIdentifiers(_ urls: [URL]) -> Set<String> {
+            Set(urls.compactMap { Bundle(url: $0)?.bundleIdentifier })
+        }
+
+        let httpsHandlers = workspace.urlsForApplications(toOpen: httpsURL)
+        let httpHandlerIDs = bundleIdentifiers(workspace.urlsForApplications(toOpen: httpURL))
+        let htmlHandlerIDs = bundleIdentifiers(workspace.urlsForApplications(toOpen: .html))
+        let ownBundleIdentifier = Bundle.main.bundleIdentifier
+
+        // Group every copy LaunchServices knows about by bundle identifier.
+        var candidatesByBundleID: [String: [URL]] = [:]
+        var bundleIDOrder: [String] = []
+        for url in httpsHandlers {
+            guard let bundleIdentifier = Bundle(url: url)?.bundleIdentifier else { continue }
+            if candidatesByBundleID[bundleIdentifier] == nil {
+                bundleIDOrder.append(bundleIdentifier)
+            }
+            candidatesByBundleID[bundleIdentifier, default: []].append(url)
+        }
+
+        return bundleIDOrder.compactMap { bundleIdentifier -> InstalledBrowserApp? in
+            guard
+                bundleIdentifier != ownBundleIdentifier,
+                httpHandlerIDs.contains(bundleIdentifier),
+                htmlHandlerIDs.contains(bundleIdentifier)
+            else { return nil }
+
+            // Prefer the copy LaunchServices would launch, but fall back to any
+            // copy in a normal location if that one is a cache/updater copy.
+            let preferred = workspace.urlForApplication(withBundleIdentifier: bundleIdentifier)
+            let candidates = (preferred.map { [$0] } ?? []) + (candidatesByBundleID[bundleIdentifier] ?? [])
+            guard let url = candidates.first(where: { !isIncidentalAppLocation($0) }) else { return nil }
+
+            return InstalledBrowserApp(
+                bundleIdentifier: bundleIdentifier,
+                url: url,
+                name: displayName(for: url)
+            )
+        }
+    }
+
+    /// Paths where app bundles exist as implementation details of something else
+    /// (test-runner caches, auto-updater staging, mounted disk images, the Trash).
+    nonisolated private static func isIncidentalAppLocation(_ url: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        let incidentalFragments = [
+            "/Library/Caches/",
+            "/Library/Application Support/",
+            "/Library/Developer/",
+            "/.Trash/",
+            "/private/var/folders/"
+        ]
+        if incidentalFragments.contains(where: path.contains) {
+            return true
+        }
+        // Mounted disk images. Only as a prefix: Safari itself lives under
+        // /System/Volumes/Preboot/Cryptexes/.
+        if path.hasPrefix("/Volumes/") {
+            return true
+        }
+        // Dot-directories such as ~/.cache or ~/.continue hold tool-managed copies.
+        return url.pathComponents.contains { $0.hasPrefix(".") && $0.count > 1 }
+    }
+
+    /// Merge the latest installed-browser scan into `browsers`, keeping the user's
+    /// ordering and visibility choices. Returns whether the list changed.
+    @discardableResult
+    func refreshInstalledBrowsers() -> Bool {
+        let installed = Self.scanInstalledBrowsers()
+        let installedBundleIDs = Set(installed.map(\.bundleIdentifier))
+
+        var updated = browsers.compactMap { browser -> Browser? in
+            let isInstalled = browser.bundleIdentifiers.contains(where: installedBundleIDs.contains)
+            if isInstalled {
+                // The scan now manages this one; it no longer needs to be persisted.
+                var browser = browser
+                browser.isCustom = false
+                return browser
+            }
+            // Uninstalled scan results disappear; hand-added entries stay so the
+            // user can see them (marked "Not installed") and remove them.
+            return browser.isCustom ? browser : nil
+        }
+
+        for app in installed where !updated.contains(where: { $0.bundleIdentifiers.contains(app.bundleIdentifier) }) {
+            let id = browserID(for: app.bundleIdentifier)
+            updated.append(
+                Browser(
+                    id: id,
+                    bundleIdentifiers: [app.bundleIdentifier],
+                    name: app.name,
+                    isVisible: !savedHiddenBrowserIDs.contains(id)
+                )
+            )
+        }
+
+        updated = sortedBySavedOrder(updated)
+
+        guard updated != browsers else { return false }
+        logger.info("refreshInstalledBrowsers: \(updated.count) browsers (\(installed.count) installed)")
+        browsers = updated
+        return true
+    }
+
+    // MARK: - Preferences
+
+    /// Switchbar 1.0.x ran as a bare executable, so its preferences live in the
+    /// `Switchbar` defaults domain. Once it ships as a bundle with a real bundle
+    /// identifier, `UserDefaults.standard` points somewhere else; copy the old
+    /// values over once so upgrading does not reset anything.
+    private func migrateLegacyDefaultsIfNeeded() {
+        guard
+            let bundleIdentifier = Bundle.main.bundleIdentifier,
+            bundleIdentifier != Self.legacyDefaultsDomain,
+            !defaults.bool(forKey: DefaultsKey.migratedLegacyDefaults)
+        else { return }
+
+        defer { defaults.set(true, forKey: DefaultsKey.migratedLegacyDefaults) }
+
+        guard let legacy = defaults.persistentDomain(forName: Self.legacyDefaultsDomain), !legacy.isEmpty else {
+            return
+        }
+
+        var copied = 0
+        for (key, value) in legacy where defaults.object(forKey: key) == nil {
+            defaults.set(value, forKey: key)
+            copied += 1
+        }
+        logger.info("Migrated \(copied) preference(s) from the legacy defaults domain")
+    }
+
     private func loadPreferences() {
         isLoadingPreferences = true
         defer { isLoadingPreferences = false }
 
-        loadDiscoveredBrowsers()
+        savedHiddenBrowserIDs = Set(defaults.stringArray(forKey: DefaultsKey.hiddenBrowserIDs) ?? [])
+        savedBrowserOrder = defaults.stringArray(forKey: DefaultsKey.browserOrder) ?? []
 
-        let hiddenBrowserIDs = Set(defaults.stringArray(forKey: DefaultsKey.hiddenBrowserIDs) ?? [])
-        browsers = browsers.map { browser in
-            var browser = browser
-            browser.isVisible = !hiddenBrowserIDs.contains(browser.id)
-            return browser
-        }
+        loadCustomBrowsers()
+        refreshInstalledBrowsers()
 
-        logger.info("loadPreferences: saved selectedBrowserID=\(self.defaults.string(forKey: DefaultsKey.selectedBrowserID) ?? "nil", privacy: .public)")
-
-        if let savedSelectedBrowserID = defaults.string(forKey: DefaultsKey.selectedBrowserID),
-           browsers.contains(where: { $0.id == savedSelectedBrowserID }) {
-            selectedBrowserID = savedSelectedBrowserID
-            logger.info("loadPreferences: using saved browser=\(savedSelectedBrowserID, privacy: .public)")
-        } else if let systemDefaultBrowserID = refreshSystemDefaultBrowser() {
+        // Trust what macOS actually reports over what we last saved: the default
+        // may have been changed in System Settings while Switchbar was not running.
+        if let systemDefaultBrowserID = refreshSystemDefaultBrowser() {
             selectedBrowserID = systemDefaultBrowserID
             logger.info("loadPreferences: using system default=\(systemDefaultBrowserID, privacy: .public)")
-        } else {
-            logger.info("loadPreferences: no saved or system default, keeping initial=\(self.selectedBrowserID, privacy: .public)")
+        } else if let savedSelectedBrowserID = defaults.string(forKey: DefaultsKey.selectedBrowserID),
+                  browsers.contains(where: { $0.id == savedSelectedBrowserID }) {
+            selectedBrowserID = savedSelectedBrowserID
+            logger.info("loadPreferences: using saved browser=\(savedSelectedBrowserID, privacy: .public)")
+        } else if let first = menuBrowsers.first ?? browsers.first {
+            selectedBrowserID = first.id
         }
-
-        _ = refreshSystemDefaultBrowser()
-        logger.info("loadPreferences: after refresh, selectedBrowserID=\(self.selectedBrowserID, privacy: .public), systemDefault=\(self.systemDefaultBrowserName ?? "nil", privacy: .public)")
 
         if defaults.object(forKey: DefaultsKey.hidesMenuBarIcon) != nil {
             hidesMenuBarIcon = defaults.bool(forKey: DefaultsKey.hidesMenuBarIcon)
@@ -305,20 +510,12 @@ final class BrowserModel: ObservableObject {
             globalHotKey = HotKey(keyCode: 49, modifiers: UInt32(optionKey), displayText: "⌥ Space")
         }
 
-        applySavedBrowserOrder()
-
-        if !visibleBrowsers.contains(where: { $0.id == selectedBrowserID }) {
-            logger.info("loadPreferences: selected browser \(self.selectedBrowserID, privacy: .public) not visible, overriding to first visible")
-            selectedBrowserID = visibleBrowsers.first?.id ?? browsers[0].id
+        if let selectedBrowser {
+            statusMessage = systemDefaultBrowserName == selectedBrowser.name
+                ? "\(selectedBrowser.name) is the current macOS default browser."
+                : "\(selectedBrowser.name) is selected."
         }
-
-        logger.info("loadPreferences: final selectedBrowserID=\(self.selectedBrowserID, privacy: .public), status=\(self.statusMessage, privacy: .public)")
-
-        if systemDefaultBrowserName == selectedBrowser.name {
-            statusMessage = "\(selectedBrowser.name) is the current macOS default browser."
-        } else {
-            statusMessage = "\(selectedBrowser.name) is selected locally."
-        }
+        logger.info("loadPreferences: final selectedBrowserID=\(self.selectedBrowserID, privacy: .public), browsers=\(self.browsers.count)")
 
         preregisterBrowsers()
         setLoginItemEnabled(launchAtLogin)
@@ -339,9 +536,16 @@ final class BrowserModel: ObservableObject {
     }
 
     private func savePreferences() {
-        logger.info("savePreferences: writing selectedBrowserID=\(self.selectedBrowserID, privacy: .public)")
+        let presentIDs = Set(browsers.map(\.id))
+
+        // Keep remembered state for browsers that are not in the list right now.
+        savedHiddenBrowserIDs = savedHiddenBrowserIDs
+            .subtracting(presentIDs)
+            .union(browsers.filter { !$0.isVisible }.map(\.id))
+        savedBrowserOrder = browsers.map(\.id) + savedBrowserOrder.filter { !presentIDs.contains($0) }
+
         defaults.set(selectedBrowserID, forKey: DefaultsKey.selectedBrowserID)
-        defaults.set(browsers.filter { !$0.isVisible }.map(\.id), forKey: DefaultsKey.hiddenBrowserIDs)
+        defaults.set(savedHiddenBrowserIDs.sorted(), forKey: DefaultsKey.hiddenBrowserIDs)
         defaults.set(hidesMenuBarIcon, forKey: DefaultsKey.hidesMenuBarIcon)
         defaults.set(launchAtLogin, forKey: DefaultsKey.launchAtLogin)
         defaults.set(menuBarIconMode.rawValue, forKey: DefaultsKey.menuBarIconMode)
@@ -349,8 +553,8 @@ final class BrowserModel: ObservableObject {
         if let data = try? JSONEncoder().encode(globalHotKey) {
             defaults.set(data, forKey: DefaultsKey.globalHotKey)
         }
-        defaults.set(browsers.map(\.id), forKey: DefaultsKey.browserOrder)
-        saveDiscoveredBrowsers()
+        defaults.set(savedBrowserOrder, forKey: DefaultsKey.browserOrder)
+        saveCustomBrowsers()
     }
 
     @discardableResult
@@ -774,26 +978,26 @@ final class BrowserModel: ObservableObject {
         browsers.first { $0.bundleIdentifiers.contains(bundleIdentifier) }
     }
 
+    /// Adopt whatever macOS reports as the default even if the scan filtered it
+    /// out, so the menu never claims a different browser is the default.
     private func discoverBrowser(bundleIdentifier: String, applicationURL: URL) -> Browser? {
-        guard !browsers.contains(where: { $0.bundleIdentifiers.contains(bundleIdentifier) }) else {
-            return browserMatching(bundleIdentifier: bundleIdentifier)
+        if let existing = browserMatching(bundleIdentifier: bundleIdentifier) {
+            return existing
         }
 
         let browser = Browser(
-            id: discoveredBrowserID(for: bundleIdentifier),
+            id: browserID(for: bundleIdentifier),
             bundleIdentifiers: [bundleIdentifier],
-            name: displayName(for: applicationURL),
-            accent: .gray,
+            name: Self.displayName(for: applicationURL),
             isVisible: true,
-            shortcut: nextAvailableShortcut()
+            isCustom: true
         )
 
         browsers.append(browser)
-        saveDiscoveredBrowsers()
         return browser
     }
 
-    private func loadDiscoveredBrowsers() {
+    private func loadCustomBrowsers() {
         guard let data = defaults.data(forKey: DefaultsKey.discoveredBrowsers) else { return }
 
         let storedBrowsers = (try? JSONDecoder().decode([StoredBrowser].self, from: data)) ?? []
@@ -803,44 +1007,45 @@ final class BrowserModel: ObservableObject {
                     id: storedBrowser.id,
                     bundleIdentifiers: [storedBrowser.bundleIdentifier],
                     name: storedBrowser.name,
-                    accent: .gray,
-                    isVisible: true,
-                    shortcut: storedBrowser.shortcut
+                    isVisible: !savedHiddenBrowserIDs.contains(storedBrowser.id),
+                    isCustom: true
                 )
             )
         }
     }
 
-    private func saveDiscoveredBrowsers() {
-        let builtInBrowserIDs = Set(["safari", "arc", "firefox", "chrome", "zen", "brave", "edge"])
+    private func saveCustomBrowsers() {
         let storedBrowsers = browsers
-            .filter { !builtInBrowserIDs.contains($0.id) }
+            .filter(\.isCustom)
             .compactMap { browser -> StoredBrowser? in
                 guard let bundleIdentifier = browser.bundleIdentifiers.first else { return nil }
-                return StoredBrowser(
-                    id: browser.id,
-                    bundleIdentifier: bundleIdentifier,
-                    name: browser.name,
-                    shortcut: browser.shortcut
-                )
+                return StoredBrowser(id: browser.id, bundleIdentifier: bundleIdentifier, name: browser.name, shortcut: nil)
             }
 
         guard let data = try? JSONEncoder().encode(storedBrowsers) else { return }
         defaults.set(data, forKey: DefaultsKey.discoveredBrowsers)
     }
 
-    private func applySavedBrowserOrder() {
-        guard let browserOrder = defaults.stringArray(forKey: DefaultsKey.browserOrder), !browserOrder.isEmpty else {
-            return
-        }
-
-        let orderIndex = Dictionary(uniqueKeysWithValues: browserOrder.enumerated().map { ($0.element, $0.offset) })
-        browsers.sort {
-            (orderIndex[$0.id] ?? Int.max) < (orderIndex[$1.id] ?? Int.max)
-        }
+    /// Order by the user's saved order; browsers never seen before go to the end
+    /// in scan order.
+    private func sortedBySavedOrder(_ browsers: [Browser]) -> [Browser] {
+        let orderIndex = Dictionary(
+            savedBrowserOrder.enumerated().map { ($0.element, $0.offset) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return browsers.enumerated()
+            .sorted { lhs, rhs in
+                let lhsRank = orderIndex[lhs.element.id] ?? Int.max
+                let rhsRank = orderIndex[rhs.element.id] ?? Int.max
+                return lhsRank == rhsRank ? lhs.offset < rhs.offset : lhsRank < rhsRank
+            }
+            .map(\.element)
     }
 
-    private func discoveredBrowserID(for bundleIdentifier: String) -> String {
+    private func browserID(for bundleIdentifier: String) -> String {
+        if let legacyID = Self.legacyBrowserIDs[bundleIdentifier] {
+            return legacyID
+        }
         let sanitizedID = bundleIdentifier
             .lowercased()
             .map { character in
@@ -849,18 +1054,12 @@ final class BrowserModel: ObservableObject {
         return "discovered-" + String(sanitizedID)
     }
 
-    private func displayName(for applicationURL: URL) -> String {
-        let bundle = Bundle(url: applicationURL)
-        let bundleDisplayName = bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
-        let bundleName = bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String
-        return bundleDisplayName ?? bundleName ?? applicationURL.deletingPathExtension().lastPathComponent
-    }
-
-    private func nextAvailableShortcut() -> String {
-        let usedShortcuts = Set(browsers.map(\.shortcut))
-        for number in 1...9 where !usedShortcuts.contains(String(number)) {
-            return String(number)
+    /// The name Finder shows for the app, e.g. "Google Chrome" or "Orion - Work".
+    nonisolated static func displayName(for applicationURL: URL) -> String {
+        let finderName = FileManager.default.displayName(atPath: applicationURL.path)
+        if finderName.hasSuffix(".app") {
+            return String(finderName.dropLast(4))
         }
-        return ""
+        return finderName.isEmpty ? applicationURL.deletingPathExtension().lastPathComponent : finderName
     }
 }
