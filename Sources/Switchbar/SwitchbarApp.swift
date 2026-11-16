@@ -12,7 +12,7 @@ struct SwitchbarApp: App {
         }
         .commands {
             CommandGroup(replacing: .appSettings) {
-                Button("Settings...") {
+                Button("Settings…") {
                     AppState.shared.showSettings()
                 }
                 .keyboardShortcut(",", modifiers: .command)
@@ -30,8 +30,8 @@ final class AppState {
 
     private init() {}
 
-    func showSettings() {
-        settingsWindowController.show(model: model)
+    func showSettings(tab: SettingsTab? = nil) {
+        settingsWindowController.show(model: model, tab: tab)
     }
 }
 
@@ -54,6 +54,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.registerHotKey(for: model)
             }
         }
+
+        // `open Switchbar.app --args -showSettings browsers` jumps straight to a tab.
+        if let tabName = UserDefaults.standard.string(forKey: "showSettings") {
+            AppState.shared.showSettings(tab: SettingsTab(rawValue: tabName) ?? .general)
+        }
+
+        // `open Switchbar.app --args -showMenu YES` pops the switcher, e.g. for screenshots.
+        if UserDefaults.standard.bool(forKey: "showMenu") {
+            DispatchQueue.main.async { [weak self] in
+                self?.statusController.showMenu()
+            }
+        }
+    }
+
+    /// Opening the app again (Finder, Spotlight, `open`) shows Settings. With the
+    /// menu bar icon hidden this is the way back in besides the hotkey.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        AppState.shared.showSettings()
+        return false
     }
 
     private func registerHotKey(for model: BrowserModel) {

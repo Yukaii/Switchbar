@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class StatusController {
+final class StatusController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menuAnchorWindow: NSPanel = {
         let window = NSPanel(
@@ -21,9 +21,21 @@ final class StatusController {
         return window
     }()
     private weak var model: BrowserModel?
+    /// One menu instance, repopulated in place, so a rebuild triggered while the
+    /// menu is open updates it rather than swapping it out from under the user.
+    private let menu = NSMenu()
 
     func bind(_ model: BrowserModel) {
         self.model = model
+        menu.delegate = self
+        statusItem.menu = menu
+        rebuildMenu()
+    }
+
+    // Re-detect installed browsers and the current macOS default every time the
+    // menu opens, so changes made outside Switchbar show up immediately.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        model?.refresh()
         rebuildMenu()
     }
 
@@ -32,7 +44,6 @@ final class StatusController {
     }
 
     func showMenu() {
-        guard let menu = statusItem.menu else { return }
         menuAnchorWindow.setFrameOrigin(menuAnchorLocation())
         menuAnchorWindow.orderFrontRegardless()
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 1), in: menuAnchorWindow.contentView)
@@ -75,8 +86,16 @@ final class StatusController {
             button.image?.isTemplate = true
         }
 
-        let menu = NSMenu()
-        for (index, browser) in model.visibleBrowsers.enumerated() {
+        menu.removeAllItems()
+
+        let browsers = model.menuBrowsers
+        if browsers.isEmpty {
+            let empty = NSMenuItem(title: "No Browsers Shown", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        }
+
+        for (index, browser) in browsers.enumerated() {
             let keyEquivalent = index < 9 ? String(index + 1) : ""
             let item = NSMenuItem(title: browser.name, action: #selector(selectBrowser(_:)), keyEquivalent: keyEquivalent)
             item.keyEquivalentModifierMask = []
@@ -89,7 +108,11 @@ final class StatusController {
 
         menu.addItem(.separator())
 
-        let settings = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
+        let about = NSMenuItem(title: "About Switchbar", action: #selector(openAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+
+        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.keyEquivalentModifierMask = .command
         settings.target = self
         menu.addItem(settings)
@@ -99,8 +122,6 @@ final class StatusController {
         quit.keyEquivalentModifierMask = .command
         quit.target = self
         menu.addItem(quit)
-
-        statusItem.menu = menu
     }
 
     private func menuIcon(for browser: Browser, model: BrowserModel) -> NSImage {
@@ -120,6 +141,10 @@ final class StatusController {
 
     @objc private func openSettings() {
         AppState.shared.showSettings()
+    }
+
+    @objc private func openAbout() {
+        AppState.shared.showSettings(tab: .about)
     }
 
     @objc private func quit() {

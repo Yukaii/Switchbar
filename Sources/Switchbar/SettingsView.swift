@@ -1,251 +1,418 @@
 import AppKit
 import Carbon
 import SwiftUI
+import UniformTypeIdentifiers
 
-struct SettingsView: View {
+// MARK: - General
+
+struct GeneralSettingsView: View {
     @EnvironmentObject private var model: BrowserModel
-    @State private var isConfiguringBrowsers = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            VStack(spacing: 0) {
-                SettingsRow("Launch at login") {
-                    Toggle("", isOn: $model.launchAtLogin)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
+        Form {
+            Section {
+                Toggle("Launch at login", isOn: $model.launchAtLogin)
+                    .disabled(!model.canLaunchAtLogin)
+            } footer: {
+                if !model.canLaunchAtLogin {
+                    Text("Available when running Switchbar.app. For the Homebrew binary, use `brew services start switchbar`.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+            }
 
-                Divider()
+            Section {
+                Toggle("Show menu bar icon", isOn: Binding(
+                    get: { model.showsMenuBarIcon },
+                    set: { model.showsMenuBarIcon = $0 }
+                ))
 
-                SettingsRow("Show menu bar icon") {
-                    Toggle("", isOn: Binding(
-                        get: { model.showsMenuBarIcon },
-                        set: { model.showsMenuBarIcon = $0 }
-                    ))
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                }
-
-                Divider()
-
-                SettingsRow("Menu bar icon") {
-                    Picker("", selection: $model.menuBarIconMode) {
-                        ForEach(MenuBarIconMode.allCases) { mode in
-                            Label(mode.title, systemImage: mode.systemImage)
-                                .tag(mode)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(width: 150)
-                }
-
-                Divider()
-
-                SettingsRow("Shown browsers") {
-                    Button("Configure...") {
-                        isConfiguringBrowsers = true
+                Picker("Icon", selection: $model.menuBarIconMode) {
+                    ForEach(MenuBarIconMode.allCases) { mode in
+                        Label(mode.title, systemImage: mode.systemImage)
+                            .tag(mode)
                     }
                 }
+                .disabled(model.hidesMenuBarIcon)
 
-                Divider()
-
-                SettingsRow("Toggle menu") {
+                LabeledContent("Open switcher") {
                     HotKeyRecorder(
                         shortcut: $model.globalShortcut,
                         onRecord: { model.setGlobalHotKey($0) }
                     )
-                        .frame(width: 150, height: 28)
+                    .frame(width: 150, height: 24)
                 }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(Color.white.opacity(0.16))
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.white.opacity(0.025))
-                    )
-            )
-            .padding(.horizontal, 28)
-            .padding(.top, 16)
-
-            Spacer(minLength: 16)
-
-            HStack {
-                Spacer()
-                Link("Inspired by Default Browser", destination: URL(string: "https://sindresorhus.com/default-browser#scripting")!)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(.bottom, 8)
-        }
-        .frame(width: 475, height: 280)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .preferredColorScheme(.dark)
-        .sheet(isPresented: $isConfiguringBrowsers) {
-            BrowserConfigurationSheet()
-                .environmentObject(model)
-        }
-    }
-}
-
-private struct SettingsRow<Accessory: View>: View {
-    private let title: String
-    private let accessory: Accessory
-
-    init(_ title: String, @ViewBuilder accessory: () -> Accessory) {
-        self.title = title
-        self.accessory = accessory()
-    }
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Text(title)
-                .font(.system(size: 15, weight: .regular))
-                .foregroundStyle(.primary)
-
-            Spacer()
-
-            accessory
-                .controlSize(.large)
-        }
-        .frame(height: 42)
-    }
-}
-
-private struct BrowserConfigurationSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var model: BrowserModel
-    @State private var draggedBrowserID: String?
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Shown Browsers")
-                        .font(.headline)
-                    Text("Drag rows to reorder")
+            } header: {
+                Text("Menu Bar")
+            } footer: {
+                if model.hidesMenuBarIcon {
+                    Text("With the icon hidden, press \(model.globalShortcut) to open the switcher.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
-                Button {
-                    addBrowser()
-                } label: {
-                    Label("Add", systemImage: "plus")
-                }
-
-                Button("Done") {
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
             }
-            .padding(20)
 
-            List {
-                ForEach(Array(model.browsers.enumerated()), id: \.element.id) { index, browser in
-                    HStack(spacing: 12) {
-                        BrowserIcon(browser: browser, size: 24)
-
-                        VStack(alignment: .leading, spacing: 2) {
+            Section("Default Browser") {
+                LabeledContent("Current default") {
+                    if let browser = model.selectedBrowser {
+                        HStack(spacing: 6) {
+                            BrowserIcon(browser: browser, size: 18)
                             Text(browser.name)
-                            if model.installedApplicationURL(for: browser) == nil {
-                                Text("Not installed")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
                         }
-
-                        Spacer()
-
-                        HStack(spacing: 4) {
-                            Button {
-                                model.moveBrowser(id: browser.id, direction: -1)
-                            } label: {
-                                Image(systemName: "chevron.up")
-                            }
-                            .disabled(index == 0)
-
-                            Button {
-                                model.moveBrowser(id: browser.id, direction: 1)
-                            } label: {
-                                Image(systemName: "chevron.down")
-                            }
-                            .disabled(index == model.browsers.count - 1)
-                        }
-                        .buttonStyle(.borderless)
-
-                        Toggle("", isOn: Binding(
-                            get: { browser.isVisible },
-                            set: { _ in model.toggleVisibility(for: browser) }
-                        ))
-                        .labelsHidden()
+                    } else {
+                        Text("Unknown")
+                            .foregroundStyle(.secondary)
                     }
-                    .padding(.vertical, 4)
-                    .onDrag {
-                        draggedBrowserID = browser.id
-                        return NSItemProvider(object: browser.id as NSString)
-                    }
-                    .onDrop(
-                        of: [.text],
-                        delegate: BrowserDropDelegate(
-                            targetBrowser: browser,
-                            draggedBrowserID: $draggedBrowserID,
-                            model: model
-                        )
-                    )
                 }
-                .onMove { offsets, destination in
-                    model.moveBrowsers(from: offsets, to: destination)
+
+                if !model.statusMessage.isEmpty {
+                    Text(model.statusMessage)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .scrollContentBackground(.hidden)
         }
-        .frame(width: 430, height: 420)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .formStyle(.grouped)
+        .scrollDisabled(true)
+        .frame(width: 500, height: 400)
+    }
+}
+
+// MARK: - Browsers
+
+struct BrowsersSettingsView: View {
+    @EnvironmentObject private var model: BrowserModel
+    @State private var selection: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Drag to reorder, or drop an app here to add it. Numbers are the switcher's keyboard shortcuts.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(spacing: 0) {
+                List(selection: $selection) {
+                    ForEach(model.browsers) { browser in
+                        BrowserRow(
+                            browser: browser,
+                            shortcutNumber: shortcutNumber(for: browser),
+                            isDefault: browser.id == model.selectedBrowserID,
+                            isInstalled: model.installedApplicationURL(for: browser) != nil
+                        )
+                        .tag(browser.id)
+                        .contextMenu { contextMenu(for: browser) }
+                    }
+                    .onMove { offsets, destination in
+                        withAnimation(.snappy(duration: 0.2)) {
+                            model.moveBrowsers(from: offsets, to: destination)
+                        }
+                    }
+                    .onInsert(of: [.fileURL]) { index, providers in
+                        insertApplications(from: providers, at: index)
+                    }
+                }
+                .listStyle(.inset(alternatesRowBackgrounds: true))
+                .onDeleteCommand(perform: removeSelected)
+
+                Divider()
+
+                bottomBar
+            }
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color(nsColor: .separatorColor))
+            )
+        }
+        .padding(20)
+        .frame(width: 500, height: 480)
+        .onAppear { model.refresh() }
     }
 
-    private func addBrowser() {
+    private var bottomBar: some View {
+        HStack(spacing: 0) {
+            Button {
+                chooseApplication()
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 24, height: 20)
+            }
+            .help("Add an app…")
+
+            Divider().frame(height: 16)
+
+            Button {
+                removeSelected()
+            } label: {
+                Image(systemName: "minus")
+                    .frame(width: 24, height: 20)
+            }
+            .disabled(!canRemoveSelection)
+            .help("Remove the selected app. Detected browsers can be hidden instead.")
+
+            Spacer()
+
+            Button {
+                withAnimation { model.refresh() }
+            } label: {
+                Label("Rescan", systemImage: "arrow.clockwise")
+                    .labelStyle(.iconOnly)
+                    .frame(width: 24, height: 20)
+            }
+            .help("Scan for newly installed browsers")
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func contextMenu(for browser: Browser) -> some View {
+        let isInstalled = model.installedApplicationURL(for: browser) != nil
+        let index = model.browsers.firstIndex(where: { $0.id == browser.id }) ?? 0
+
+        Button("Make Default Browser") { model.choose(browser) }
+            .disabled(!isInstalled || browser.id == model.selectedBrowserID)
+
+        Button(browser.isVisible ? "Hide from Menu" : "Show in Menu") {
+            model.toggleVisibility(for: browser)
+        }
+
+        Divider()
+
+        Button("Move to Top") { model.moveBrowserToTop(id: browser.id) }
+            .disabled(index == 0)
+        Button("Move Up") { model.moveBrowser(id: browser.id, direction: -1) }
+            .disabled(index == 0)
+        Button("Move Down") { model.moveBrowser(id: browser.id, direction: 1) }
+            .disabled(index == model.browsers.count - 1)
+
+        Divider()
+
+        Button("Show in Finder") {
+            if let url = model.installedApplicationURL(for: browser) {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+        }
+        .disabled(!isInstalled)
+
+        if browser.isCustom {
+            Button("Remove", role: .destructive) { model.removeBrowser(id: browser.id) }
+        }
+    }
+
+    /// 1-based position in the switcher menu, matching its key equivalents.
+    private func shortcutNumber(for browser: Browser) -> Int? {
+        guard let index = model.menuBrowsers.firstIndex(where: { $0.id == browser.id }), index < 9 else {
+            return nil
+        }
+        return index + 1
+    }
+
+    private var canRemoveSelection: Bool {
+        guard let selection else { return false }
+        return model.browsers.first(where: { $0.id == selection })?.isCustom == true
+    }
+
+    private func removeSelected() {
+        guard canRemoveSelection, let selection else { return }
+        model.removeBrowser(id: selection)
+        self.selection = nil
+    }
+
+    private func chooseApplication() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.applicationBundle]
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.prompt = "Add"
 
-        if panel.runModal() == .OK, let url = panel.url {
-            model.addBrowser(from: url)
+        if panel.runModal() == .OK {
+            for url in panel.urls {
+                model.addBrowser(from: url)
+            }
+        }
+    }
+
+    private func insertApplications(from providers: [NSItemProvider], at index: Int) {
+        let model = model
+        for provider in providers {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                Task { @MainActor in
+                    withAnimation(.snappy(duration: 0.2)) {
+                        model.addBrowser(from: url, at: index)
+                    }
+                }
+            }
         }
     }
 }
 
-private struct BrowserDropDelegate: DropDelegate {
-    let targetBrowser: Browser
-    @Binding var draggedBrowserID: String?
-    let model: BrowserModel
+private struct BrowserRow: View {
+    @EnvironmentObject private var model: BrowserModel
 
-    func dropEntered(info: DropInfo) {
-        guard let draggedBrowserID, draggedBrowserID != targetBrowser.id else { return }
+    let browser: Browser
+    let shortcutNumber: Int?
+    let isDefault: Bool
+    let isInstalled: Bool
 
-        withAnimation {
-            model.moveBrowser(id: draggedBrowserID, to: targetBrowser.id)
+    var body: some View {
+        HStack(spacing: 10) {
+            Toggle("Show \(browser.name) in menu", isOn: Binding(
+                get: { browser.isVisible },
+                set: { _ in model.toggleVisibility(for: browser) }
+            ))
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+            .help(browser.isVisible ? "Shown in the menu" : "Hidden from the menu")
+
+            HStack(spacing: 10) {
+                BrowserIcon(browser: browser, size: 24)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text(browser.name)
+                            .lineLimit(1)
+                        if isDefault {
+                            Text("Default")
+                                .font(.caption2.weight(.medium))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color.accentColor.opacity(0.18)))
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    if !isInstalled {
+                        Text("Not installed")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .opacity(browser.isVisible && isInstalled ? 1 : 0.5)
+
+            Spacer(minLength: 8)
+
+            if let shortcutNumber, browser.isVisible {
+                Text("\(shortcutNumber)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 18, minHeight: 18)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(Color(nsColor: .tertiaryLabelColor))
+                    )
+                    .help("Press \(shortcutNumber) in the switcher menu")
+            }
+
+            Image(systemName: "line.3.horizontal")
+                .foregroundStyle(.tertiary)
+                .help("Drag to reorder")
         }
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        draggedBrowserID = nil
-        return true
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
     }
 }
 
-private struct BrowserIcon: View {
+// MARK: - About
+
+struct AboutSettingsView: View {
+    @EnvironmentObject private var model: BrowserModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            AppIconImage(size: 96)
+                .padding(.bottom, 12)
+
+            Text("Switchbar")
+                .font(.system(size: 22, weight: .semibold))
+
+            HStack(spacing: 6) {
+                Text(AppInfo.versionDescription)
+                if let commit = AppInfo.commit {
+                    Text("·")
+                    Link(String(commit.prefix(7)), destination: AppInfo.repositoryURL.appending(path: "commit/\(commit)"))
+                }
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .padding(.top, 2)
+
+            Text("Switch your default browser from the menu bar.")
+                .font(.callout)
+                .padding(.top, 12)
+
+            HStack(spacing: 10) {
+                Button("Check for Updates…") {
+                    NSWorkspace.shared.open(AppInfo.releasesURL)
+                }
+                Button("GitHub") {
+                    NSWorkspace.shared.open(AppInfo.repositoryURL)
+                }
+                Button("Report an Issue") {
+                    NSWorkspace.shared.open(AppInfo.issuesURL)
+                }
+            }
+            .controlSize(.regular)
+            .padding(.top, 18)
+
+            Spacer(minLength: 16)
+
+            Text("Inspired by [Default Browser](https://sindresorhus.com/default-browser) by Sindre Sorhus.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Released under the MIT License.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 2)
+        }
+        .multilineTextAlignment(.center)
+        .padding(.top, 28)
+        .padding(.bottom, 18)
+        .padding(.horizontal, 24)
+        .frame(width: 500, height: 340)
+    }
+}
+
+/// The real app icon when running from Switchbar.app, otherwise a SwiftUI
+/// rendering of the same design (for `swift run` and the bare binary).
+struct AppIconImage: View {
+    let size: CGFloat
+
+    var body: some View {
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: size, height: size)
+        } else {
+            RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
+                .fill(LinearGradient(
+                    colors: [Color(red: 0.31, green: 0.56, blue: 1.0), Color(red: 0.36, green: 0.27, blue: 0.93)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ))
+                .overlay(
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.system(size: size * 0.42, weight: .semibold))
+                        .foregroundStyle(.white)
+                )
+                .padding(size * 0.1)
+                .frame(width: size, height: size)
+                .shadow(color: .black.opacity(0.2), radius: size * 0.03, y: size * 0.02)
+        }
+    }
+}
+
+// MARK: - Shared
+
+struct BrowserIcon: View {
     @EnvironmentObject private var model: BrowserModel
 
     let browser: Browser
@@ -275,6 +442,7 @@ private struct HotKeyRecorder: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: ShortcutRecorderButton, context: Context) {
+        nsView.currentShortcut = shortcut
         if !nsView.isRecording {
             nsView.title = shortcut.isEmpty ? "Record Shortcut" : shortcut
         }
@@ -283,22 +451,36 @@ private struct HotKeyRecorder: NSViewRepresentable {
 
 private final class ShortcutRecorderButton: NSButton {
     var onShortcutChanged: ((HotKey) -> Void)?
+    var currentShortcut = ""
     private(set) var isRecording = false
     private var localMonitor: Any?
 
     override func mouseDown(with event: NSEvent) {
-        startRecording()
+        isRecording ? cancelRecording() : startRecording()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            cancelRecording()
+        }
+        super.viewWillMove(toWindow: newWindow)
     }
 
     private func startRecording() {
         isRecording = true
-        title = "Recording..."
+        title = "Type shortcut…"
         window?.makeFirstResponder(self)
 
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.record(event)
             return nil
         }
+    }
+
+    private func cancelRecording() {
+        guard isRecording else { return }
+        stopRecording()
+        title = currentShortcut.isEmpty ? "Record Shortcut" : currentShortcut
     }
 
     private func stopRecording() {
@@ -310,9 +492,18 @@ private final class ShortcutRecorderButton: NSButton {
     }
 
     private func record(_ event: NSEvent) {
-        guard event.keyCode != 53 else {
-            stopRecording()
-            title = "Record Shortcut"
+        guard event.keyCode != UInt16(kVK_Escape) else {
+            cancelRecording()
+            return
+        }
+
+        // A global shortcut without ⌘/⌥/⌃ would swallow ordinary typing
+        // everywhere, so require one (function keys are fine on their own).
+        let requiredModifiers: NSEvent.ModifierFlags = [.command, .option, .control]
+        let isFunctionKey = event.specialKey.map(Self.functionKeys.contains) ?? false
+        guard !event.modifierFlags.intersection(requiredModifiers).isEmpty || isFunctionKey else {
+            NSSound.beep()
+            title = "Add ⌘, ⌥ or ⌃…"
             return
         }
 
@@ -327,6 +518,11 @@ private final class ShortcutRecorderButton: NSButton {
         stopRecording()
     }
 
+    private static let functionKeys: Set<NSEvent.SpecialKey> = [
+        .f1, .f2, .f3, .f4, .f5, .f6, .f7, .f8, .f9, .f10,
+        .f11, .f12, .f13, .f14, .f15, .f16, .f17, .f18, .f19, .f20
+    ]
+
     private func shortcutDescription(for event: NSEvent) -> String {
         var parts: [String] = []
         if event.modifierFlags.contains(.control) { parts.append("⌃") }
@@ -334,8 +530,26 @@ private final class ShortcutRecorderButton: NSButton {
         if event.modifierFlags.contains(.shift) { parts.append("⇧") }
         if event.modifierFlags.contains(.command) { parts.append("⌘") }
 
-        let key = event.charactersIgnoringModifiers?.uppercased() ?? ""
-        return (parts + [key]).joined(separator: " ")
+        return (parts + [keyName(for: event)]).joined(separator: " ")
+    }
+
+    private func keyName(for event: NSEvent) -> String {
+        switch Int(event.keyCode) {
+        case kVK_Space: "Space"
+        case kVK_Return: "↩"
+        case kVK_Tab: "⇥"
+        case kVK_Delete: "⌫"
+        case kVK_LeftArrow: "←"
+        case kVK_RightArrow: "→"
+        case kVK_UpArrow: "↑"
+        case kVK_DownArrow: "↓"
+        default:
+            if let specialKey = event.specialKey, let index = Self.functionKeys.sorted(by: { $0.rawValue < $1.rawValue }).firstIndex(of: specialKey) {
+                "F\(index + 1)"
+            } else {
+                event.charactersIgnoringModifiers?.uppercased() ?? ""
+            }
+        }
     }
 
     private func carbonModifiers(for flags: NSEvent.ModifierFlags) -> UInt32 {
