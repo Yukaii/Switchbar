@@ -727,13 +727,20 @@ final class BrowserModel: ObservableObject {
     }
 
     private func setLoginItemEnabled(_ enabled: Bool) {
+        // Outside a .app bundle (e.g. the Homebrew binary), SMAppService registers the
+        // bare executable as a login item, which macOS then opens in Terminal at login.
+        // Never register there; only clean up an entry left by an earlier build.
+        // The Homebrew binary auto-starts through `brew services` instead.
+        let register = enabled && canLaunchAtLogin
+        let service = SMAppService.mainApp
+        guard register || service.status != .notRegistered else { return }
         do {
-            if enabled {
-                try SMAppService.mainApp.register()
+            if register {
+                try service.register()
             } else {
-                try SMAppService.mainApp.unregister()
+                try service.unregister()
             }
-            logger.info("Login item \(enabled ? "registered" : "unregistered", privacy: .public)")
+            logger.info("Login item \(register ? "registered" : "unregistered", privacy: .public)")
         } catch {
             logger.error("Failed to update login item: \(error.localizedDescription, privacy: .public)")
         }
